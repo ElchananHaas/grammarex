@@ -12,10 +12,14 @@ pub enum GrammarexParseError {
     InvalidEscape,
     #[error("You must close all inner parenthesis before closing quotes")]
     MismatchedQuotesAndParenthesis,
+    #[error("Mismatched parenthesis")]
+    MismatchedParenthesis,
     #[error("The charachter`{0}` must follow an expression")]
     DidntFollowExpression(char),
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrammarEx {
+    Epsilon,
     Char(char),
     CharRange(RangeInclusive<char>),
     Seq(Vec<GrammarEx>),
@@ -23,16 +27,16 @@ pub enum GrammarEx {
     Alt(Vec<GrammarEx>),
     Plus(Box<GrammarEx>),
     Optional(Box<GrammarEx>),
-    Assign(String, Box<GrammarEx>),
-    Call(String),
+    Assign(Box<GrammarEx>, Box<GrammarEx>),
+    Var(String),
 }
-
+//Takes the first char of the string. This mutates the input.
 fn take_first(input: &mut &str) -> Option<char> {
     let first: char = input.chars().next()?;
     *input = &input[first.len_utf8()..];
     return Some(first);
 }
-
+//Peek at the next k chars. Doesn't advance the input.
 fn peek_k<const N: usize>(input: &&str) -> Option<[char; N]> {
     let mut result: [char; N] = ['_'; N];
     let mut chars = input.chars();
@@ -42,16 +46,20 @@ fn peek_k<const N: usize>(input: &&str) -> Option<[char; N]> {
     }
     return Some(result);
 }
-fn peek(input: &&str, amount: usize) -> Option<char> {
-    let item = input.chars().skip(amount).next()?;
+//Peek at the next char. Doesn't advance the input.
+fn peek(input: &&str) -> Option<char> {
+    let item = input.chars().next()?;
     return Some(item);
 }
+//Skips some number of input chars. This method panics if there isn't enough input
 fn skip(input: &mut &str, amount: usize) {
     for _ in 0..amount {
         let c = input.chars().next().expect("Uexpectedly ran out of input");
         *input = &input[c.len_utf8()..];
     }
 }
+// This parses the inner part of a regex bracket match.
+// The '[' token must have already been parsed.
 fn parse_backet_inner(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
     let mut classes = Vec::new();
     let mut first = true;
@@ -64,15 +72,17 @@ fn parse_backet_inner(input: &mut &str) -> Result<GrammarEx, GrammarexParseError
         //[a-c] represents [abc] but if the dash is first or last, it is considered a literal like in [ax-]
         if let Some(cs) = peek_k::<2>(input) {
             if cs[0] == '-' && cs[1] != ']' {
-                classes.push(GrammarEx::CharRange(c..=cs[2]));
+                first = false;
+                classes.push(GrammarEx::CharRange(c..=cs[1]));
                 skip(input, 2);
+                continue;
             }
         }
         classes.push(GrammarEx::Char(c));
         first = false;
     }
 }
-
+// This method trims all ascii whitespace from the input.
 fn trim_whitespace(input: &mut &str) {
     loop {
         let checkpoint = *input;
@@ -85,72 +95,127 @@ fn trim_whitespace(input: &mut &str) {
         }
     }
 }
-enum Part {
-    GrammarEx(GrammarEx),
-    OrBar,
-    Equals,
-    VarName(String),
-    Semicolon,
+
+static ESCAPED_CHARS: &'static str = "\\\"'+*?()[]=";
+
+// Parses a terminal expression. These expressions always have the highest binding precendence.
+fn parse_terminal(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    trim_whitespace(input);
+    let first = take_first(input).ok_or(GrammarexParseError::UnexpectedEnd)?;
+    if first == '\\' {
+        return handle_escaped_char(input);
+    }
+    if first == '[' {
+        return parse_backet_inner(input);
+    }
+    if first == '(' {
+        return parse_parentheses(input);
+    }
+    //TODO handle strings.
+    //TODO handle variable names
+    Err(GrammarexParseError::DidntFollowExpression(first))
 }
-static ESCAPED_CHARS: &'static str = "\\\"'+*?";
-static SINGLE_ITEMS_MODS: &'static str = "*+?";
-pub fn parse_grammarex(input: &mut &str, mut in_string: bool) -> Result<GrammarEx, GrammarexParseError> {
-    let mut parts:Vec<Part> = Vec::new();
-    let mut started_string = false;
+
+//Parses a terminal expression and any tightly bound modifiers.
+fn parse_single_item(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    let mut top = parse_terminal(input)?;
+    trim_whitespace(input);
     loop {
-        if !in_string {
-            trim_whitespace(input);
-        }
-        let checkpoint = *input;
-        let first = take_first(input).ok_or(GrammarexParseError::UnexpectedEnd)?;
-        if first == '\\' {
-            let escaped = take_first(input).ok_or(GrammarexParseError::UnexpectedEnd)?;
-            if ESCAPED_CHARS.contains(escaped) {
-                parts.push(Part::GrammarEx(GrammarEx::Char(escaped)));
-            } else {
-                return Err(GrammarexParseError::InvalidEscape);
-            }
-        }
-        if first == '[' {
-            parts.push(Part::GrammarEx(parse_backet_inner(input)?));
-        }
-        if first == '(' {
-            parts.push(Part::GrammarEx(parse_grammarex(input, in_string)?));
-        }
-        if first == '"' {
-            if in_string && started_string {
-                in_string = false;
-            } else if !in_string {
-                in_string = true;
-                started_string = true;
-                parts.push(Part::GrammarEx(parse_grammarex(input, true)?));
-            } else {
-                return Err(GrammarexParseError::MismatchedQuotesAndParenthesis);
-            }
-        }
-        if SINGLE_ITEMS_MODS.contains(first) {
-            if let Some(top) = parts.pop() {
-                if let Part::GrammarEx(ex) = top {
-                    let ex = match first {
-                        '?' => GrammarEx::Optional(Box::new(ex)),
-                        '+' => GrammarEx::Plus(Box::new(ex)),
-                        '*' => GrammarEx::Star(Box::new(ex)),
-                        _ => panic!("Operator {} isn't a modifier.",first)
-                    };
-                    parts.push(Part::GrammarEx(ex));
-                } else {
-                    return Err(GrammarexParseError::DidntFollowExpression(first));
+        if let Some(first) = peek(input) {
+            let sym_match = match first {
+                '?' => Ok(GrammarEx::Optional(Box::new(top))),
+                '+' => Ok(GrammarEx::Plus(Box::new(top))),
+                '*' => Ok(GrammarEx::Star(Box::new(top))),
+                _ => Err(top),
+            };
+            match sym_match {
+                Ok(expr) => {
+                    //The peek matched a symbol, so use it.
+                    take_first(input);
+                    //There might be more modifiers, so loop.
+                    top = expr;
                 }
-            } else {
-                return Err(GrammarexParseError::DidntFollowExpression(first));
+                Err(expr) => {
+                    return Ok(expr);
+                }
             }
+        } else {
+            return Ok(top);
         }
     }
-
 }
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
+//Parses an assignment or tighter binding.
+fn parse_assignment(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    let current = parse_single_item(input)?;
+    trim_whitespace(input);
+    if let Some('=') = peek(input) {
+        take_first(input);
+        Ok(GrammarEx::Assign(
+            Box::new(current),
+            Box::new(parse_single_item(input)?),
+        ))
+    } else {
+        Ok(current)
+    }
+}
+
+//Parses a sequence of items. If the sequence is empty it returns an error.
+fn parse_seq(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    let mut res = vec![parse_assignment(input)?];
+    while let Ok(next) = parse_assignment(input) {
+        res.push(next);
+    }
+    Ok(match res.len() {
+        1 => res.remove(0),
+        _ => GrammarEx::Seq(res),
+    })
+}
+
+fn parse_or_group(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    let mut res = vec![parse_seq(input)?];
+    loop {
+        trim_whitespace(input);
+        if let Some('|') = peek(input) {
+            if let Ok(next) = parse_seq(input) {
+                res.push(next);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(match res.len() {
+        1 => res.remove(0),
+        _ => GrammarEx::Alt(res),
+    })
+}
+
+pub fn parse_grammarex(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    trim_whitespace(input);
+    if input.is_empty() {
+        Ok(GrammarEx::Epsilon)
+    } else {
+        parse_or_group(input)
+    }
+}
+
+fn parse_parentheses(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    let res = parse_grammarex(input)?;
+    if let Some(')') = peek(input) {
+        Ok(res)
+    } else {
+        Err(GrammarexParseError::MismatchedParenthesis)
+    }
+}
+fn handle_escaped_char(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    let escaped = take_first(input).ok_or(GrammarexParseError::UnexpectedEnd)?;
+    if ESCAPED_CHARS.contains(escaped) {
+        Ok(GrammarEx::Char(escaped))
+    } else {
+        return Err(GrammarexParseError::InvalidEscape);
+    }
 }
 
 #[cfg(test)]
@@ -158,8 +223,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn test_basic_char_class() {
+        let result = parse_grammarex(&mut "[abc]").unwrap();
+        assert_eq!(
+            GrammarEx::Alt(vec![
+                GrammarEx::Char('a'),
+                GrammarEx::Char('b'),
+                GrammarEx::Char('c')
+            ]),
+            result
+        );
+    }
+
+    #[test]
+    fn test_single_char_class() {
+        let result = parse_grammarex(&mut "[a]").unwrap();
+        assert_eq!(GrammarEx::Alt(vec![GrammarEx::Char('a'),]), result);
+    }
+
+    #[test]
+    fn test_char_class_range() {
+        let result = parse_grammarex(&mut "[a-c]").unwrap();
+        assert_eq!(
+            GrammarEx::Alt(vec![GrammarEx::CharRange('a'..='c')],),
+            result
+        );
+    }
+    #[test]
+    fn test_dash_at_end() {
+        let result = parse_grammarex(&mut "[abc-]").unwrap();
+        assert_eq!(
+            GrammarEx::Alt(vec![
+                GrammarEx::Char('a'),
+                GrammarEx::Char('b'),
+                GrammarEx::Char('c'),
+                GrammarEx::Char('-')
+            ]),
+            result
+        );
+    }
+    #[test]
+    fn test_dash_at_start() {
+        let result = parse_grammarex(&mut "[-abc]").unwrap();
+        assert_eq!(
+            GrammarEx::Alt(vec![
+                GrammarEx::Char('-'),
+                GrammarEx::Char('a'),
+                GrammarEx::Char('b'),
+                GrammarEx::Char('c'),
+            ]),
+            result
+        );
+    }
+
+    #[test]
+    fn test_star() {
+        let result = parse_grammarex(&mut "[a]*").unwrap();
+        assert_eq!(
+            GrammarEx::Star(Box::new(GrammarEx::Alt(vec![GrammarEx::Char('a'),]))),
+            result
+        );
     }
 }
