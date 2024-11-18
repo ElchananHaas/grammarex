@@ -107,6 +107,7 @@ fn parse_terminal(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
         *input = checkpoint;
         return parse_varname(input);
     }
+    *input = checkpoint;
     Err(GrammarexParseError::DidntFollowExpression(first))
 }
 
@@ -194,6 +195,7 @@ fn parse_or_group(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
     loop {
         trim_whitespace(input);
         if let Some('|') = peek(input) {
+            take_first(input);
             if let Ok(next) = parse_seq(input) {
                 res.push(next);
             } else {
@@ -353,10 +355,31 @@ mod tests {
     }
 
     #[test]
+    fn test_simple_seq() {
+        let result = parse_grammarex(&mut r#" "a" "b" "c" "#).unwrap();
+        assert_eq!(
+            GrammarEx::Seq(vec![
+                GrammarEx::Seq(vec![GrammarEx::Char('a')]),
+                GrammarEx::Seq(vec![GrammarEx::Char('b')]),
+                GrammarEx::Seq(vec![GrammarEx::Char('c')]),
+            ]),
+            result
+        );
+    }
+    #[test]
     fn test_var_assignment() {
         let result = parse_grammarex(&mut r#" abc = def "#).unwrap();
         assert_eq!(
             GrammarEx::Assign(Box::new(GrammarEx::Var("abc".to_owned())), Box::new(GrammarEx::Var("def".to_owned()))),
+            result
+        );
+    }
+
+    #[test]
+    fn test_alt() {
+        let result = parse_grammarex(&mut r#" "a" | "b" "#).unwrap();
+        assert_eq!(
+            GrammarEx::Alt(vec![GrammarEx::Seq(vec![GrammarEx::Char('a')]), GrammarEx::Seq(vec![GrammarEx::Char('b')])]),
             result
         );
     }
