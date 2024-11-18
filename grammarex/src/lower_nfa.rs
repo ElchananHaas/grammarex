@@ -126,7 +126,21 @@ fn lower_nfa(graph: &mut Graph, expr: GrammarEx) -> Result<EpsilonNfa, LoweringE
             graph.add_edge(res.start, res.end, Action::Epsilon);
             Ok(res)
         },
-        GrammarEx::Assign(grammar_ex, grammar_ex1) => todo!(),
+        GrammarEx::Assign(var, expr) => {
+            let GrammarEx::Var(var) = *var else {
+                return Err(LoweringError::InvalidVariableAssignment);
+            };
+            let GrammarEx::Var(expr) = *expr else {
+                return Err(LoweringError::InvalidVariableAssignment);
+            };
+            let start = graph.create_node();
+            let end = graph.create_node();
+            graph.add_edge(start, end, Action::CallAssign(var, expr));
+            Ok(EpsilonNfa {
+                start,
+                end
+            })
+        },
         GrammarEx::Var(var) => {
             let start = graph.create_node();
             let end = graph.create_node();
