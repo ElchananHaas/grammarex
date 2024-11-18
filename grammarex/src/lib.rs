@@ -10,12 +10,12 @@ pub enum GrammarexParseError {
     UnexpectedEnd,
     #[error("Invalid backslash escape")]
     InvalidEscape,
-    #[error("You must close all inner parenthesis before closing quotes")]
-    MismatchedQuotesAndParenthesis,
     #[error("Mismatched parenthesis")]
     MismatchedParenthesis,
     #[error("The charachter`{0}` must follow an expression")]
     DidntFollowExpression(char),
+    #[error("Mismatched quotes")]
+    MismatchedQuotes,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrammarEx {
@@ -101,6 +101,7 @@ static ESCAPED_CHARS: &'static str = "\\\"'+*?()[]=";
 // Parses a terminal expression. These expressions always have the highest binding precendence.
 fn parse_terminal(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
     trim_whitespace(input);
+    let checkpoint = *input;
     let first = take_first(input).ok_or(GrammarexParseError::UnexpectedEnd)?;
     if first == '\\' {
         return handle_escaped_char(input);
@@ -111,9 +112,34 @@ fn parse_terminal(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
     if first == '(' {
         return parse_parentheses(input);
     }
-    //TODO handle strings.
-    //TODO handle variable names
+    if first == '"' {
+        return parse_string(input);
+    }
+    if first.is_ascii_alphabetic() {
+        *input = checkpoint;
+        return parse_varname(input);
+    }
     Err(GrammarexParseError::DidntFollowExpression(first))
+}
+
+fn parse_varname(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    for (i,c) in input.char_indices() {
+        if !c.is_ascii_alphabetic() {
+            return Ok(GrammarEx::Var(input[..i].to_string()));
+        }
+    }
+    return Ok(GrammarEx::Var(input.to_string()));
+}
+fn parse_string(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
+    let mut res = Vec::new();
+    while let Some(c) = take_first(input) {
+        if c == '"' {
+            return Ok(GrammarEx::Seq(res));
+        } else {
+            res.push(GrammarEx::Char(c));
+        }
+    }
+    return Err(GrammarexParseError::MismatchedQuotes);
 }
 
 //Parses a terminal expression and any tightly bound modifiers.
@@ -281,6 +307,17 @@ mod tests {
         let result = parse_grammarex(&mut "[a]*").unwrap();
         assert_eq!(
             GrammarEx::Star(Box::new(GrammarEx::Alt(vec![GrammarEx::Char('a'),]))),
+            result
+        );
+    }
+
+    #[test]
+    fn test_question_star() {
+        let result = parse_grammarex(&mut "[a]?*").unwrap();
+        assert_eq!(
+            GrammarEx::Star(Box::new(GrammarEx::Optional(Box::new(GrammarEx::Alt(
+                vec![GrammarEx::Char('a'),]
+            ))))),
             result
         );
     }
