@@ -370,7 +370,10 @@ mod tests {
     fn test_var_assignment() {
         let result = parse_grammarex(&mut r#" abc = def "#).unwrap();
         assert_eq!(
-            GrammarEx::Assign(Box::new(GrammarEx::Var("abc".to_owned())), Box::new(GrammarEx::Var("def".to_owned()))),
+            GrammarEx::Assign(
+                Box::new(GrammarEx::Var("abc".to_owned())),
+                Box::new(GrammarEx::Var("def".to_owned()))
+            ),
             result
         );
     }
@@ -379,7 +382,10 @@ mod tests {
     fn test_alt() {
         let result = parse_grammarex(&mut r#" "a" | "b" "#).unwrap();
         assert_eq!(
-            GrammarEx::Alt(vec![GrammarEx::Seq(vec![GrammarEx::Char('a')]), GrammarEx::Seq(vec![GrammarEx::Char('b')])]),
+            GrammarEx::Alt(vec![
+                GrammarEx::Seq(vec![GrammarEx::Char('a')]),
+                GrammarEx::Seq(vec![GrammarEx::Char('b')])
+            ]),
             result
         );
     }
