@@ -22,7 +22,7 @@ enum Action {
 }
 struct Node {
     out_edges: BTreeSet<usize>,
-    in_edges: BTreeSet<usize>
+    in_edges: BTreeSet<usize>,
 }
 
 struct Edge {
@@ -31,14 +31,14 @@ struct Edge {
     action: Action,
 }
 
-// Invariants: 
+// Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
 // It is in the node it ends at's in_edges and no other in_edges
-// For each node, an edge is in out_edges iff it starts at the node. 
+// For each node, an edge is in out_edges iff it starts at the node.
 // It is in the in edges iff it ends at that node.
 struct Graph {
     nodes: Vec<Node>,
-    edges: Vec<Edge>
+    edges: Vec<Edge>,
 }
 
 #[derive(Clone)]
@@ -49,7 +49,10 @@ struct EpsilonNfa {
 
 impl Graph {
     fn create_node(&mut self) -> usize {
-        self.nodes.push(Node { out_edges: BTreeSet::new(), in_edges: BTreeSet::new() });
+        self.nodes.push(Node {
+            out_edges: BTreeSet::new(),
+            in_edges: BTreeSet::new(),
+        });
         self.nodes.len() - 1
     }
     fn add_edge(&mut self, start: usize, end: usize, action: Action) {
@@ -100,17 +103,18 @@ fn epsilon_closure(graph: &Graph, node: usize) -> BTreeSet<usize> {
 }
 fn eliminate_epsilon(graph: &mut Graph) {
     let orig_nodes = graph.nodes.len();
-    for i in 0..orig_nodes {
-        
-    }
+    for i in 0..orig_nodes {}
 }
 
 fn lower_nfa(graph: &mut Graph, expr: GrammarEx) -> Result<EpsilonNfa, LoweringError> {
     match expr {
         GrammarEx::Epsilon => {
             let node = graph.create_node();
-            Ok(EpsilonNfa {start: node, end: node})
-        },
+            Ok(EpsilonNfa {
+                start: node,
+                end: node,
+            })
+        }
         GrammarEx::Char(c) => {
             let start = graph.create_node();
             let end = graph.create_node();
@@ -151,7 +155,10 @@ fn lower_nfa(graph: &mut Graph, expr: GrammarEx) -> Result<EpsilonNfa, LoweringE
                 Ok(res)
             } else {
                 let node = graph.create_node();
-                Ok(EpsilonNfa { start: node, end: node })
+                Ok(EpsilonNfa {
+                    start: node,
+                    end: node,
+                })
             }
         }
         GrammarEx::Plus(grammar_ex) => {
