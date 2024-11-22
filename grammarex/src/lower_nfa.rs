@@ -61,9 +61,16 @@ impl Graph {
         self.nodes[start].out_edges.insert(idx);
         self.nodes[end].in_edges.insert(idx);
     }
+    // Remove an edge. This method leaks the edge, this should be OK.
+    fn remove_edge(&mut self, edge: usize) {
+        let start = self.edges[edge].start;
+        let end = self.edges[edge].end;
+        self.nodes[start].out_edges.remove(&edge);
+        self.nodes[end].in_edges.remove(&edge);
+    }
     // Contracts the second node into the first node.
     // This method returns the index of the first node (the one still in use)
-    // This method technically leaks the second node, but this should be OK.
+    // This method leaks the second node, but this should be OK.
     fn merge_nodes(&mut self, first: usize, second: usize) {
         if first == second {
             return;
@@ -98,12 +105,18 @@ fn epsilon_closure(graph: &Graph, node: usize) -> BTreeSet<usize> {
             to_process.push(graph.edges[edge].end);
         }
     }
-    closure.remove(&node);
     closure
 }
+
+fn eliminate_epsilon_node(graph: &mut Graph, node: usize) {
+    let eps_closure = epsilon_closure(graph, node);
+}
+
 fn eliminate_epsilon(graph: &mut Graph) {
-    let orig_nodes = graph.nodes.len();
-    for i in 0..orig_nodes {}
+    let node_len = graph.nodes.len();
+    for i in 0..node_len {
+        
+    }
 }
 
 fn lower_nfa(graph: &mut Graph, expr: GrammarEx) -> Result<EpsilonNfa, LoweringError> {
