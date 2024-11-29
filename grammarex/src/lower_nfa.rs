@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, mem, ops::RangeInclusive};
+use std::{collections::{BTreeSet, VecDeque}, mem, ops::RangeInclusive};
 
 use thiserror::Error;
 
@@ -14,28 +14,43 @@ enum CharClass {
     Char(char),
     Range(RangeInclusive<char>),
 }
-enum Action {
+enum EpsNfaCharMatch {
     Epsilon,
-    Match(CharClass),
+    Match(CharClass)
+}
+struct EpsNfaAction {
+    char_match : EpsNfaCharMatch,
+    actions: Vec<Action>
+}
+enum Action {
     Call(String),
     CallAssign(String, String),
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct EdgeIndex(pub usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NodeIndex(pub usize);
+struct EdgeRef {
+    index: EdgeIndex,
+    priority: isize
+}
 struct Node {
-    out_edges: BTreeSet<usize>,
-    in_edges: BTreeSet<usize>,
+    //Out edges are sorted by priority for taking them.
+    out_edges: VecDeque<EdgeIndex>,
+    in_edges: BTreeSet<EdgeIndex>,
 }
 
 struct Edge {
-    start: usize,
-    end: usize,
-    action: Action,
+    start: NodeIndex,
+    end: NodeIndex,
+    action: EpsNfaAction,
 }
 
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
 // It is in the node it ends at's in_edges and no other in_edges
-// For each node, an edge is in out_edges iff it starts at the node.
-// It is in the in edges iff it ends at that node.
+// For each node, an edge is in its out_edges iff it starts at the node.
+// Its in its in_edges iff it ends at that node.
 struct Graph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -48,68 +63,43 @@ struct EpsilonNfa {
 }
 
 impl Graph {
-    fn create_node(&mut self) -> usize {
+    fn create_node(&mut self) -> NodeIndex {
         self.nodes.push(Node {
-            out_edges: BTreeSet::new(),
+            out_edges: VecDeque::new(),
             in_edges: BTreeSet::new(),
         });
-        self.nodes.len() - 1
+        NodeIndex(self.nodes.len() - 1)
     }
-    fn add_edge(&mut self, start: usize, end: usize, action: Action) {
+    fn add_edge_lowest_priority(&mut self, start: NodeIndex, end: NodeIndex, action: EpsNfaAction) {
         let idx = self.edges.len();
         self.edges.push(Edge { start, end, action });
-        self.nodes[start].out_edges.insert(idx);
-        self.nodes[end].in_edges.insert(idx);
+        self.nodes[start.0].out_edges.push_back(EdgeIndex(idx));
+        self.nodes[end.0].in_edges.insert(EdgeIndex(idx));
     }
-    // Remove an edge. This method leaks the edge, this should be OK.
-    fn remove_edge(&mut self, edge: usize) {
-        let start = self.edges[edge].start;
-        let end = self.edges[edge].end;
-        self.nodes[start].out_edges.remove(&edge);
-        self.nodes[end].in_edges.remove(&edge);
-    }
-    // Contracts the second node into the first node.
-    // This method returns the index of the first node (the one still in use)
-    // This method leaks the second node, but this should be OK.
-    fn merge_nodes(&mut self, first: usize, second: usize) {
-        if first == second {
-            return;
-        }
-        //Steal the node's edges so I can work on them seperately from the rest of the graph.
-        let mut second_out_edges = BTreeSet::new();
-        let mut second_in_edges = BTreeSet::new();
-        mem::swap(&mut second_out_edges, &mut self.nodes[second].out_edges);
-        mem::swap(&mut second_in_edges, &mut self.nodes[second].in_edges);
-        for edge in second_out_edges {
-            self.edges[edge].start = first;
-            self.nodes[first].out_edges.insert(edge);
-            //No need to remove from the target's in edges - the edge still ends there.
-        }
-        for edge in second_in_edges {
-            //No need to remove from the source's out edges - the edge still starts there.
-            self.edges[edge].end = first;
-            self.nodes[first].in_edges.insert(edge);
-        }
+
+    fn add_edge_highest_priority(&mut self, start: NodeIndex, end: NodeIndex, action: EpsNfaAction) {
+        let idx = self.edges.len();
+        self.edges.push(Edge { start, end, action });
+        self.nodes[start.0].out_edges.push_front(EdgeIndex(idx));
+        self.nodes[end.0].in_edges.insert(EdgeIndex(idx));
     }
 }
 
-fn epsilon_closure(graph: &Graph, node: usize) -> BTreeSet<usize> {
+fn epsilon_closure(graph: &Graph, node: usize) -> Vec<usize> {
     let mut closure = BTreeSet::new();
     let mut to_process = vec![node];
+    let mut res = Vec::new();
     while let Some(top) = to_process.pop() {
         if closure.contains(&top) {
             continue;
         }
         closure.insert(top);
+        res.push(top);
         for &edge in &graph.nodes[top].out_edges {
             to_process.push(graph.edges[edge].end);
         }
     }
-    closure
-}
-
-fn eliminate_epsilon_node(graph: &mut Graph, node: usize) {
-    let eps_closure = epsilon_closure(graph, node);
+    res
 }
 
 fn eliminate_epsilon(graph: &mut Graph) {
@@ -119,71 +109,65 @@ fn eliminate_epsilon(graph: &mut Graph) {
     }
 }
 
-fn lower_nfa(graph: &mut Graph, expr: GrammarEx) -> Result<EpsilonNfa, LoweringError> {
+fn epsilon_no_action() -> EpsNfaAction {
+    EpsNfaAction { char_match: EpsNfaCharMatch::Epsilon, actions: vec![] }
+}
+//Takes in an Epsilon NFA graph, an end node, and an expresion to lower. Returns the start node of the expression
+//lowered as an NFA with end_node accepting.
+fn lower_nfa_inner(graph: &mut Graph, end_node : NodeIndex, expr: GrammarEx) -> Result<NodeIndex, LoweringError> {
     match expr {
         GrammarEx::Epsilon => {
-            let node = graph.create_node();
-            Ok(EpsilonNfa {
-                start: node,
-                end: node,
-            })
-        }
+            Ok(end_node)
+        },
         GrammarEx::Char(c) => {
-            let start = graph.create_node();
-            let end = graph.create_node();
-            graph.add_edge(start, end, Action::Match(CharClass::Char(c)));
-            Ok(EpsilonNfa { start, end })
-        }
+            let start_node = graph.create_node();
+            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Match(CharClass::Char(c)), actions: vec![] });
+            Ok(start_node)
+        },
         GrammarEx::CharRange(range) => {
-            let start = graph.create_node();
-            let end = graph.create_node();
-            graph.add_edge(start, end, Action::Match(CharClass::Range(range)));
-            Ok(EpsilonNfa { start, end })
-        }
-        GrammarEx::Seq(mut vec) => {
-            let end = graph.create_node();
-            let mut start = end;
-            while let Some(current) = vec.pop() {
-                let part = lower_nfa(graph, current)?;
-                let new_start = part.start;
-                graph.merge_nodes(part.end, start);
-                start = new_start;
+            let start_node = graph.create_node();
+            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Match(CharClass::Range(range)), actions: vec![] });
+            Ok(start_node)
+        },
+        GrammarEx::Seq(mut exprs) => {
+            let mut start_node = end_node;
+            while let Some(expr) = exprs.pop() {
+                start_node = lower_nfa_inner(graph, start_node, expr)?;
             }
-            Ok(EpsilonNfa { start, end })
-        }
-        GrammarEx::Star(grammar_ex) => {
-            let res = lower_nfa(graph, *grammar_ex)?;
-            graph.add_edge(res.start, res.end, Action::Epsilon);
-            graph.add_edge(res.end, res.start, Action::Epsilon);
-            Ok(res)
-        }
+            Ok(start_node)
+        },
+        GrammarEx::Star(expr) => {
+            let start_node = lower_nfa_inner(graph, end_node, *expr)?;
+            //For a star operator, looping back is always highest priority. Skipping it is lowest priority
+            graph.add_edge_highest_priority(end_node, start_node, epsilon_no_action());
+            graph.add_edge_lowest_priority(start_node, end_node, epsilon_no_action());
+            Ok(start_node)
+        },
+        GrammarEx::Plus(expr) => {
+            let start_node = lower_nfa_inner(graph, end_node, *expr)?;
+            //For a plus operator, looping back is always highest priority. It can't be skipped.
+            graph.add_edge_highest_priority(end_node, start_node, epsilon_no_action());
+            Ok(start_node)
+        },
         GrammarEx::Alt(mut vec) => {
-            if let Some(expr) = vec.pop() {
-                let res = lower_nfa(graph, expr)?;
-                while let Some(next) = vec.pop() {
-                    let next_nfa = lower_nfa(graph, next)?;
-                    graph.merge_nodes(res.start, next_nfa.start);
-                    graph.merge_nodes(res.end, next_nfa.end);
-                }
-                Ok(res)
-            } else {
-                let node = graph.create_node();
-                Ok(EpsilonNfa {
-                    start: node,
-                    end: node,
-                })
+            //The code could get away with not creating a node if the
+            //alt is non-empty, but that would make it more complicated.
+            let start_node = graph.create_node();
+            let mut current = start_node;
+            while let Some(expr) = vec.pop() {
+                let new_current = lower_nfa_inner(graph, end_node, expr)?;
+                //In an alt, going on to the next alternitive has lower priority than following the current alternitive.
+                graph.add_edge_lowest_priority(current, new_current, epsilon_no_action());
+                current = new_current;
             }
-        }
-        GrammarEx::Plus(grammar_ex) => {
-            let res = lower_nfa(graph, *grammar_ex)?;
-            graph.add_edge(res.end, res.start, Action::Epsilon);
-            Ok(res)
-        }
-        GrammarEx::Optional(grammar_ex) => {
-            let res = lower_nfa(graph, *grammar_ex)?;
-            graph.add_edge(res.start, res.end, Action::Epsilon);
-            Ok(res)
-        }
+            Ok(start_node)
+        },
+        GrammarEx::Optional(grammar_ex) =>  {
+            let start_node = lower_nfa_inner(graph, end_node, *grammar_ex)?;
+            //An option can be skipped, the action has lowest priority over consuming input
+            graph.add_edge_lowest_priority(start_node, end_node, epsilon_no_action());
+            Ok(start_node)
+        },
         GrammarEx::Assign(var, expr) => {
             let GrammarEx::Var(var) = *var else {
                 return Err(LoweringError::InvalidVariableAssignment);
@@ -191,16 +175,14 @@ fn lower_nfa(graph: &mut Graph, expr: GrammarEx) -> Result<EpsilonNfa, LoweringE
             let GrammarEx::Var(expr) = *expr else {
                 return Err(LoweringError::InvalidVariableAssignment);
             };
-            let start = graph.create_node();
-            let end = graph.create_node();
-            graph.add_edge(start, end, Action::CallAssign(var, expr));
-            Ok(EpsilonNfa { start, end })
-        }
-        GrammarEx::Var(var) => {
-            let start = graph.create_node();
-            let end = graph.create_node();
-            graph.add_edge(start, end, Action::Call(var));
-            Ok(EpsilonNfa { start, end })
-        }
+            let start_node = graph.create_node();
+            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Epsilon, actions: vec![Action::CallAssign(var, expr)] });
+            Ok(start_node)
+        },
+        GrammarEx::Var(expr) => {
+            let start_node = graph.create_node();
+            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Epsilon, actions: vec![Action::Call(expr)] });
+            Ok(start_node)
+        },
     }
 }
