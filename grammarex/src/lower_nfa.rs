@@ -1,4 +1,8 @@
-use std::{collections::{BTreeSet, VecDeque}, mem, ops::RangeInclusive};
+use std::{
+    collections::{BTreeSet, HashMap, VecDeque},
+    mem,
+    ops::RangeInclusive,
+};
 
 use thiserror::Error;
 
@@ -8,6 +12,8 @@ use crate::types::GrammarEx;
 pub enum LoweringError {
     #[error("Invalid variable assignment")]
     InvalidVariableAssignment,
+    #[error("Couldn't locate expression `{0}`")]
+    UnknownExpression(String),
 }
 
 enum CharClass {
@@ -16,15 +22,20 @@ enum CharClass {
 }
 enum EpsNfaCharMatch {
     Epsilon,
-    Match(CharClass)
+    Match(CharClass),
 }
 struct EpsNfaAction {
-    char_match : EpsNfaCharMatch,
-    actions: Vec<Action>
+    char_match: EpsNfaCharMatch,
+    actions: Vec<Action>,
 }
 enum Action {
-    Call(String),
-    CallAssign(String, String),
+    Call(CallData),
+    CallAssign(CallData, String),
+}
+
+struct CallData {
+    name: String,
+    return_node: NodeIndex,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct EdgeIndex(pub usize);
@@ -32,7 +43,7 @@ struct EdgeIndex(pub usize);
 struct NodeIndex(pub usize);
 struct EdgeRef {
     index: EdgeIndex,
-    priority: isize
+    priority: isize,
 }
 struct Node {
     //Out edges are sorted by priority for taking them.
@@ -77,7 +88,12 @@ impl Graph {
         self.nodes[end.0].in_edges.insert(EdgeIndex(idx));
     }
 
-    fn add_edge_highest_priority(&mut self, start: NodeIndex, end: NodeIndex, action: EpsNfaAction) {
+    fn add_edge_highest_priority(
+        &mut self,
+        start: NodeIndex,
+        end: NodeIndex,
+        action: EpsNfaAction,
+    ) {
         let idx = self.edges.len();
         self.edges.push(Edge { start, end, action });
         self.nodes[start.0].out_edges.push_front(EdgeIndex(idx));
@@ -85,89 +101,91 @@ impl Graph {
     }
 }
 
-fn epsilon_closure(graph: &Graph, node: usize) -> Vec<usize> {
-    let mut closure = BTreeSet::new();
-    let mut to_process = vec![node];
-    let mut res = Vec::new();
-    while let Some(top) = to_process.pop() {
-        if closure.contains(&top) {
-            continue;
-        }
-        closure.insert(top);
-        res.push(top);
-        for &edge in &graph.nodes[top].out_edges {
-            to_process.push(graph.edges[edge].end);
-        }
+fn eliminate_epsilon(graph: &mut Graph) {
+    for i in 0..graph.nodes.len() {
+        add_epsilon_closure(graph, i);
     }
-    res
 }
 
-fn eliminate_epsilon(graph: &mut Graph) {
-    let node_len = graph.nodes.len();
-    for i in 0..node_len {
-        
-    }
-}
+fn add_epsilon_closure(graph: &mut Graph, i: usize) {}
 
 fn epsilon_no_action() -> EpsNfaAction {
-    EpsNfaAction { char_match: EpsNfaCharMatch::Epsilon, actions: vec![] }
+    EpsNfaAction {
+        char_match: EpsNfaCharMatch::Epsilon,
+        actions: vec![],
+    }
 }
-//Takes in an Epsilon NFA graph, an end node, and an expresion to lower. Returns the start node of the expression
-//lowered as an NFA with end_node accepting.
-fn lower_nfa_inner(graph: &mut Graph, end_node : NodeIndex, expr: GrammarEx) -> Result<NodeIndex, LoweringError> {
+
+//Takes in an Epsilon NFA graph, a start node, a name table from expression names to start nodes and an expresion to lower.
+//Returns the end node of the expression lowered as an NFA with end_node accepting.
+fn lower_nfa_inner(
+    graph: &mut Graph,
+    start_node: NodeIndex,
+    name_table: &HashMap<String, NodeIndex>,
+    expr: GrammarEx,
+) -> Result<NodeIndex, LoweringError> {
     match expr {
-        GrammarEx::Epsilon => {
-            Ok(end_node)
-        },
+        GrammarEx::Epsilon => Ok(start_node),
         GrammarEx::Char(c) => {
-            let start_node = graph.create_node();
-            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Match(CharClass::Char(c)), actions: vec![] });
-            Ok(start_node)
-        },
+            let end_node = graph.create_node();
+            graph.add_edge_lowest_priority(
+                start_node,
+                end_node,
+                EpsNfaAction {
+                    char_match: EpsNfaCharMatch::Match(CharClass::Char(c)),
+                    actions: vec![],
+                },
+            );
+            Ok(end_node)
+        }
         GrammarEx::CharRange(range) => {
-            let start_node = graph.create_node();
-            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Match(CharClass::Range(range)), actions: vec![] });
-            Ok(start_node)
-        },
-        GrammarEx::Seq(mut exprs) => {
-            let mut start_node = end_node;
-            while let Some(expr) = exprs.pop() {
-                start_node = lower_nfa_inner(graph, start_node, expr)?;
+            let end_node = graph.create_node();
+            graph.add_edge_lowest_priority(
+                start_node,
+                end_node,
+                EpsNfaAction {
+                    char_match: EpsNfaCharMatch::Match(CharClass::Range(range)),
+                    actions: vec![],
+                },
+            );
+            Ok(end_node)
+        }
+        GrammarEx::Seq(exprs) => {
+            let mut end_node = start_node;
+            for expr in exprs {
+                end_node = lower_nfa_inner(graph, end_node, name_table, expr)?;
             }
-            Ok(start_node)
-        },
+            Ok(end_node)
+        }
         GrammarEx::Star(expr) => {
-            let start_node = lower_nfa_inner(graph, end_node, *expr)?;
+            let end_node = lower_nfa_inner(graph, start_node, name_table, *expr)?;
             //For a star operator, looping back is always highest priority. Skipping it is lowest priority
             graph.add_edge_highest_priority(end_node, start_node, epsilon_no_action());
             graph.add_edge_lowest_priority(start_node, end_node, epsilon_no_action());
-            Ok(start_node)
-        },
+            Ok(end_node)
+        }
         GrammarEx::Plus(expr) => {
-            let start_node = lower_nfa_inner(graph, end_node, *expr)?;
+            let end_node = lower_nfa_inner(graph, start_node, name_table, *expr)?;
             //For a plus operator, looping back is always highest priority. It can't be skipped.
             graph.add_edge_highest_priority(end_node, start_node, epsilon_no_action());
-            Ok(start_node)
-        },
-        GrammarEx::Alt(mut vec) => {
+            Ok(end_node)
+        }
+        GrammarEx::Alt(exprs) => {
             //The code could get away with not creating a node if the
             //alt is non-empty, but that would make it more complicated.
-            let start_node = graph.create_node();
-            let mut current = start_node;
-            while let Some(expr) = vec.pop() {
-                let new_current = lower_nfa_inner(graph, end_node, expr)?;
-                //In an alt, going on to the next alternitive has lower priority than following the current alternitive.
-                graph.add_edge_lowest_priority(current, new_current, epsilon_no_action());
-                current = new_current;
+            let end_node = graph.create_node();
+            for expr in exprs {
+                let end = lower_nfa_inner(graph, start_node, name_table, expr)?;
+                graph.add_edge_lowest_priority(end, end_node, epsilon_no_action());
             }
-            Ok(start_node)
-        },
-        GrammarEx::Optional(grammar_ex) =>  {
-            let start_node = lower_nfa_inner(graph, end_node, *grammar_ex)?;
-            //An option can be skipped, the action has lowest priority over consuming input
+            Ok(end_node)
+        }
+        GrammarEx::Optional(grammar_ex) => {
+            let end_node = lower_nfa_inner(graph, start_node, name_table, *grammar_ex)?;
+            //An option can be skipped, skipping has lowest priority over consuming input
             graph.add_edge_lowest_priority(start_node, end_node, epsilon_no_action());
-            Ok(start_node)
-        },
+            Ok(end_node)
+        }
         GrammarEx::Assign(var, expr) => {
             let GrammarEx::Var(var) = *var else {
                 return Err(LoweringError::InvalidVariableAssignment);
@@ -175,14 +193,42 @@ fn lower_nfa_inner(graph: &mut Graph, end_node : NodeIndex, expr: GrammarEx) -> 
             let GrammarEx::Var(expr) = *expr else {
                 return Err(LoweringError::InvalidVariableAssignment);
             };
-            let start_node = graph.create_node();
-            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Epsilon, actions: vec![Action::CallAssign(var, expr)] });
-            Ok(start_node)
-        },
+            let expr_node = *name_table
+                .get(&expr)
+                .ok_or_else(|| LoweringError::UnknownExpression(expr.clone()))?;
+            let return_node = graph.create_node();
+            let call_data = CallData {
+                name: expr.clone(),
+                return_node,
+            };
+            graph.add_edge_lowest_priority(
+                start_node,
+                expr_node,
+                EpsNfaAction {
+                    char_match: EpsNfaCharMatch::Epsilon,
+                    actions: vec![Action::CallAssign(call_data, var)],
+                },
+            );
+            Ok(return_node)
+        }
         GrammarEx::Var(expr) => {
-            let start_node = graph.create_node();
-            graph.add_edge_lowest_priority(start_node, end_node, EpsNfaAction { char_match: EpsNfaCharMatch::Epsilon, actions: vec![Action::Call(expr)] });
-            Ok(start_node)
-        },
+            let expr_node = *name_table
+                .get(&expr)
+                .ok_or_else(|| LoweringError::UnknownExpression(expr.clone()))?;
+            let return_node = graph.create_node();
+            let call_data = CallData {
+                name: expr,
+                return_node,
+            };
+            graph.add_edge_lowest_priority(
+                start_node,
+                expr_node,
+                EpsNfaAction {
+                    char_match: EpsNfaCharMatch::Epsilon,
+                    actions: vec![Action::Call(call_data)],
+                },
+            );
+            Ok(return_node)
+        }
     }
 }
