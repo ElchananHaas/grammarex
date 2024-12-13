@@ -54,6 +54,7 @@ pub struct EdgeIndex(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeIndex(usize);
 
+#[derive(Clone)]
 pub enum EdgeTarget{
     NodeIndex(NodeIndex),
     Return
@@ -187,10 +188,6 @@ fn replace_with_epsilon_closure(
     for edge_index in edges {
         let edge = context.graph.get_edge(edge_index);
         if let EpsCharMatch::Match(char_match) = &edge.data.char_match {
-            // Return edges don't match chars.
-            let EdgeTarget::NodeIndex(end) = edge.end else {
-                panic!("In epsilon elimination a return edge matches a char.")
-            };
             //Make sure to include the last edge's actions too.
             path.push(edge_index);
             let mut new_actions = Vec::new();
@@ -201,7 +198,7 @@ fn replace_with_epsilon_closure(
             }
             new_graph.add_edge_lowest_priority(
                 context.start,
-                EdgeTarget::NodeIndex(end),
+                edge.end.clone(),
                 NsmAction {
                     char_match: char_match.clone(),
                     actions: new_actions,
@@ -233,6 +230,7 @@ fn replace_with_epsilon_closure(
                     //In the case where there is no previous call operation, then the return
                     //must be computed at run time. This, outside of left recursive loops, will shorten
                     //the stack and lead to eventual termination.
+                    let mut new_actions = Vec::new();
                     path.push(edge_index);
                     for &path_edge_index in &*path {
                         for action in context.graph.get_edge(path_edge_index).data.actions.iter().rev() {
