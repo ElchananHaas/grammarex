@@ -77,7 +77,7 @@ pub fn compile(
     machines: HashMap<String, GrammarEx>,
     start_machine: &String,
 ) -> Result<NsmInstructions, LoweringError> {
-    let mut graph: Graph<EpsNsmAction, NodeIndex> = Graph {
+    let mut graph: Graph<EpsNsmAction, EdgeTarget> = Graph {
         nodes: Vec::new(),
         edges: Vec::new(),
     };
@@ -87,7 +87,7 @@ pub fn compile(
         .collect();
     let mut end_nodes = HashMap::new();
     for machine in machines {
-        let end_node = lower_nsm_inner(
+        let end_node = lower_nsm(
             &mut graph,
             *machine_starts.get(&machine.0).expect("It exists"),
             &machine_starts,
@@ -97,7 +97,6 @@ pub fn compile(
     }
     let elim = eliminate_epsilon(
         &mut graph,
-        end_nodes.values().map(|x|*x).collect(),
     );
     Ok(NsmInstructions {
         start_node: *machine_starts.get(start_machine).ok_or_else(|| LoweringError::UnknownExpression(start_machine.clone()))?,
@@ -140,13 +139,15 @@ impl<EdgeData, EdgeTarget> Graph<EdgeData, EdgeTarget> {
 
 struct ElimContext<'a> {
     start: NodeIndex,
-    graph: &'a Graph<EpsNsmAction, NodeIndex>,
-    accepting_nodes: &'a HashSet<NodeIndex>
+    graph: &'a Graph<EpsNsmAction, EdgeTarget>,
 }
-//Takes in an epsilon  graph and the accepting node. Returns an equivilent  graph that has had epsilon elimination performed.
+
+struct PathData {
+
+}
+//Takes in an epsilon graph and the accepting nodes. Returns an equivilent graph that has had epsilon elimination performed.
 fn eliminate_epsilon(
-    graph: &mut Graph<EpsNsmAction, NodeIndex>,
-    accepting_nodes: HashSet<NodeIndex>,
+    graph: &mut Graph<EpsNsmAction, EdgeTarget>,
 ) -> Graph<NsmAction, EdgeTarget> {
     let mut new_graph: Graph<NsmAction, EdgeTarget> = Graph {
         nodes: Vec::new(),
@@ -161,7 +162,6 @@ fn eliminate_epsilon(
         let context = ElimContext {
             start: NodeIndex(i),
             graph: &graph,
-            accepting_nodes: &accepting_nodes
         };
         replace_with_epsilon_closure(
             &context,
@@ -186,8 +186,11 @@ fn replace_with_epsilon_closure(
     let edges = context.graph.get_node(current_node).out_edges.clone();
     for edge_index in edges {
         let edge = context.graph.get_edge(edge_index);
-        let edge_end = edge.end;
         if let EpsCharMatch::Match(char_match) = &edge.data.char_match {
+            // Return edges don't match chars.
+            let EdgeTarget::NodeIndex(end) = edge.end else {
+                panic!("In epsilon elimination a return edge matches a char.")
+            };
             //Make sure to include the last edge's actions too.
             path.push(edge_index);
             let mut new_actions = Vec::new();
@@ -198,7 +201,7 @@ fn replace_with_epsilon_closure(
             }
             new_graph.add_edge_lowest_priority(
                 context.start,
-                EdgeTarget::NodeIndex(edge.end),
+                EdgeTarget::NodeIndex(end),
                 NsmAction {
                     char_match: char_match.clone(),
                     actions: new_actions,
@@ -206,21 +209,39 @@ fn replace_with_epsilon_closure(
             );
             path.pop();
         } else {
-            //If the visit set contains the node, there was already a more preferred way to
-            //get to this node and any nodes reachable from it. So, just return.
-            //TODO if the edge is a call edge there may be some more work
-            //needed to handle inductive cycles.
-            if visit_set.contains(&edge_end) {
-                continue;
+            match edge.end {
+                EdgeTarget::NodeIndex(end) => {
+                    //If the visit set contains the node, there was already a more preferred way to
+                    //get to this node and any nodes reachable from it. So, just return.
+                    //TODO if the edge is a call edge there may be some more work
+                    //needed to handle inductive cycles.
+                    if visit_set.contains(&end) {
+                        continue;
+                    }
+                    path.push(edge_index);
+                    replace_with_epsilon_closure(context, end, new_graph, visit_set, path);
+                    path.pop();
+                },
+                EdgeTarget::Return => {
+                    //In this case, the node accepts. This lets us return to the caller and 
+                    //continue. The edges to be returned to will be substituted in at run time.
+            
+                    //There is an extra complication if there was a previous call operation in 
+                    //the path. In this case, the return node must be precomputed in order
+                    //to compute the entire epsilon closure. If this isn't done then some epsilon 
+                    //transitions may be missed, leading to infinite loops. 
+                    //In the case where there is no previous call operation, then the return
+                    //must be computed at run time. This, outside of left recursive loops, will shorten
+                    //the stack and lead to eventual termination.
+                    path.push(edge_index);
+                    for &path_edge_index in &*path {
+                        for action in context.graph.get_edge(path_edge_index).data.actions.iter().rev() {
+                            new_actions.push(action.clone());
+                        }
+                    }
+                    path.pop();
+                },
             }
-            //In this case, the node accepts. This lets us return to the caller and 
-            //continue. The edges to be returned to will be substituted in at run time.
-            if context.accepting_nodes.contains(&edge.end) {
-                
-            }
-            path.push(edge_index);
-            replace_with_epsilon_closure(context, edge_end, new_graph, visit_set, path);
-            path.pop();
         }
     }
 }
@@ -232,10 +253,20 @@ fn epsilon_no_action() -> EpsNsmAction {
     }
 }
 
+fn lower_nsm(
+    graph: &mut Graph<EpsNsmAction, EdgeTarget>,
+    start_node: NodeIndex,
+    name_table: &HashMap<String, NodeIndex>,
+    expr: GrammarEx,
+) -> Result<NodeIndex, LoweringError> {
+    let end_node = lower_nsm_rec(graph, start_node, name_table, expr)?;
+    graph.add_edge_lowest_priority(end_node, EdgeTarget::Return, epsilon_no_action());
+    Ok(end_node)
+}
 // Takes in an Epsilon graph, a start node, a name table from expression names to start nodes and an expresion to lower.
 // Returns the end node of the expression lowered as an subgraph with end_node accepting.
-fn lower_nsm_inner(
-    graph: &mut Graph<EpsNsmAction, NodeIndex>,
+fn lower_nsm_rec(
+    graph: &mut Graph<EpsNsmAction, EdgeTarget>,
     start_node: NodeIndex,
     name_table: &HashMap<String, NodeIndex>,
     expr: GrammarEx,
@@ -246,7 +277,7 @@ fn lower_nsm_inner(
             let end_node = graph.create_node();
             graph.add_edge_lowest_priority(
                 start_node,
-                end_node,
+                EdgeTarget::NodeIndex(end_node),
                 EpsNsmAction {
                     char_match: EpsCharMatch::Match(CharClass::Char(c)),
                     actions: vec![],
@@ -258,7 +289,7 @@ fn lower_nsm_inner(
             let end_node = graph.create_node();
             graph.add_edge_lowest_priority(
                 start_node,
-                end_node,
+                EdgeTarget::NodeIndex(end_node),
                 EpsNsmAction {
                     char_match: EpsCharMatch::Match(CharClass::Range(range)),
                     actions: vec![],
@@ -269,21 +300,21 @@ fn lower_nsm_inner(
         GrammarEx::Seq(exprs) => {
             let mut end_node = start_node;
             for expr in exprs {
-                end_node = lower_nsm_inner(graph, end_node, name_table, expr)?;
+                end_node = lower_nsm_rec(graph, end_node, name_table, expr)?;
             }
             Ok(end_node)
         }
         GrammarEx::Star(expr) => {
-            let end_node = lower_nsm_inner(graph, start_node, name_table, *expr)?;
+            let end_node = lower_nsm_rec(graph, start_node, name_table, *expr)?;
             //For a star operator, looping back is always highest priority. Skipping it is lowest priority
-            graph.add_edge_highest_priority(end_node, start_node, epsilon_no_action());
-            graph.add_edge_lowest_priority(start_node, end_node, epsilon_no_action());
+            graph.add_edge_highest_priority(end_node, EdgeTarget::NodeIndex(start_node), epsilon_no_action());
+            graph.add_edge_lowest_priority(start_node,EdgeTarget::NodeIndex(end_node), epsilon_no_action());
             Ok(end_node)
         }
         GrammarEx::Plus(expr) => {
-            let end_node = lower_nsm_inner(graph, start_node, name_table, *expr)?;
+            let end_node = lower_nsm_rec(graph, start_node, name_table, *expr)?;
             //For a plus operator, looping back is always highest priority. It can't be skipped.
-            graph.add_edge_highest_priority(end_node, start_node, epsilon_no_action());
+            graph.add_edge_highest_priority(end_node, EdgeTarget::NodeIndex(start_node), epsilon_no_action());
             Ok(end_node)
         }
         GrammarEx::Alt(exprs) => {
@@ -291,15 +322,15 @@ fn lower_nsm_inner(
             //alt is non-empty, but that would make it more complicated.
             let end_node = graph.create_node();
             for expr in exprs {
-                let end = lower_nsm_inner(graph, start_node, name_table, expr)?;
-                graph.add_edge_lowest_priority(end, end_node, epsilon_no_action());
+                let end = lower_nsm_rec(graph, start_node, name_table, expr)?;
+                graph.add_edge_lowest_priority(end, EdgeTarget::NodeIndex(end_node), epsilon_no_action());
             }
             Ok(end_node)
         }
         GrammarEx::Optional(grammar_ex) => {
-            let end_node = lower_nsm_inner(graph, start_node, name_table, *grammar_ex)?;
+            let end_node = lower_nsm_rec(graph, start_node, name_table, *grammar_ex)?;
             //An option can be skipped, skipping has lowest priority over consuming input
-            graph.add_edge_lowest_priority(start_node, end_node, epsilon_no_action());
+            graph.add_edge_lowest_priority(start_node, EdgeTarget::NodeIndex(end_node), epsilon_no_action());
             Ok(end_node)
         }
         GrammarEx::Assign(var, expr) => {
@@ -319,7 +350,7 @@ fn lower_nsm_inner(
             };
             graph.add_edge_lowest_priority(
                 start_node,
-                expr_node,
+                EdgeTarget::NodeIndex(expr_node),
                 EpsNsmAction {
                     char_match: EpsCharMatch::Epsilon,
                     actions: vec![Action::CallAssign(call_data, var)],
@@ -338,7 +369,7 @@ fn lower_nsm_inner(
             };
             graph.add_edge_lowest_priority(
                 start_node,
-                expr_node,
+                EdgeTarget::NodeIndex(expr_node),
                 EpsNsmAction {
                     char_match: EpsCharMatch::Epsilon,
                     actions: vec![Action::Call(call_data)],
