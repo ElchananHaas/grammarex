@@ -266,8 +266,8 @@ fn replace_with_epsilon_closure<'a>(
     path: &mut PathData<'a>,
 ) {
     visit_set.insert(current_node);
-    let edges = context.graph.get_node(current_node).out_edges.clone();
-    for edge_index in edges {
+    let edges = &context.graph.get_node(current_node).out_edges;
+    for &edge_index in edges {
         let edge: &Edge<EpsNsmEdgeData> = context.graph.get_edge(edge_index);
         //Follow edge simulates the result of following the edge. This must be paired with a pop statement.
         if let Some(next_node) = path.follow_edge(&context.graph, edge_index) {
@@ -286,16 +286,17 @@ fn replace_with_epsilon_closure<'a>(
                 );
             } else {
                 //If the visit set contains the node, there was already a more preferred way to
-                //get to this node and any nodes reachable from it. So, just return.
+                //get to this node and any nodes reachable from it. So do nothing
                 //TODO if the edge is a call edge there may be some more work
-                //needed to handle inductive cycles.
+                //needed to handle inductive cycles, since the node can return to itself.
                 if !visit_set.contains(&next_node) {
+                    //In this case, there is an edge that consumes epsilon. So recursively explore more of the graph.
                     replace_with_epsilon_closure(context, next_node, new_graph, visit_set, path);
                 }
             }
         } else {
             //In this branch, there was a return but no known caller. The process must stop here due to this.
-            //Instead, DFA at runtime must be used.
+            //Instead, Depth First Search at runtime must be used.
             let new_actions = path.get_actions();
             new_graph.add_edge_lowest_priority(
                 context.start,
@@ -457,5 +458,24 @@ fn lower_nsm_rec(
             );
             Ok(return_node)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse_grammarex;
+
+    use super::*;
+
+    #[test]
+    fn test_compile_machine() {
+        let expr = parse_grammarex(&mut "[abc]").unwrap();
+        let start = "start".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr);
+        let machine =  compile( machines,
+            &start,
+        ).unwrap();
+        dbg!(machine);
     }
 }
