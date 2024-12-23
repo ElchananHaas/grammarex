@@ -1,10 +1,9 @@
-use std::ops::RangeInclusive;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrammarEx {
     Epsilon,
     Char(char),
-    CharRange(RangeInclusive<char>),
+    CharRangeInclusive(char, char),
     Seq(Vec<GrammarEx>),
     Star(Box<GrammarEx>),
     Alt(Vec<GrammarEx>),

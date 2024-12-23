@@ -61,7 +61,7 @@ fn parse_backet_inner(input: &mut &str) -> Result<GrammarEx, GrammarexParseError
         if let Some(cs) = peek_k::<2>(input) {
             if cs[0] == '-' && cs[1] != ']' {
                 first = false;
-                classes.push(GrammarEx::CharRange(c..=cs[1]));
+                classes.push(GrammarEx::CharRangeInclusive(c,cs[1]));
                 skip(input, 2);
                 continue;
             }
@@ -264,7 +264,7 @@ mod tests {
     fn test_char_class_range() {
         let result = parse_grammarex(&mut "[a-c]").unwrap();
         assert_eq!(
-            GrammarEx::Alt(vec![GrammarEx::CharRange('a'..='c')],),
+            GrammarEx::Alt(vec![GrammarEx::CharRangeInclusive('a','c')],),
             result
         );
     }

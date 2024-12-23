@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    ops::RangeInclusive,
 };
 
 use thiserror::Error;
@@ -15,10 +14,10 @@ pub enum LoweringError {
     UnknownExpression(String),
 }
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 enum CharClass {
     Char(char),
-    Range(RangeInclusive<char>),
+    RangeInclusive(char, char),
 }
 #[derive(PartialEq, Eq, Clone)]
 enum EpsCharMatch {
@@ -26,24 +25,28 @@ enum EpsCharMatch {
     Match(CharClass),
 }
 //An edge of the NSM that consumes input
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 pub struct NsmConsumeEdge {
     char_match: CharClass,
     target_node: NodeIndex,
 }
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 pub enum NsmEdgeTransition {
     Consume(NsmConsumeEdge),
     //An edge of the NSM that returns to an unknown place and therefore
     //doesn't consume input.
     Return,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NsmEdgeData {
     pub transition: NsmEdgeTransition,
     pub actions: Vec<Action>,
+    //A list of nodes to push on the return stack when transitioning this edge.
+    //The VM will use separate stacks for return addresses and for data.
+    pub push_return_stack: Vec<NodeIndex>,
 }
-#[derive(Clone, Debug)]
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
     Assign(String, String),
 }
@@ -70,7 +73,7 @@ struct EpsNsmEdgeData {
     char_match: EpsCharMatch,
     actions: Vec<Action>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Node {
     //Out edges are sorted by priority for taking them.
     out_edges: VecDeque<EdgeIndex>,
@@ -107,14 +110,102 @@ pub fn compile(
         )?;
         end_nodes.insert(machine.0.clone(), end_node);
     }
-    let elim = eliminate_epsilon(&mut graph);
+    let elim = eliminate_epsilon(&graph);
+    let deduped = deduplicate(&elim);
+    let start_node = *machine_starts
+        .get(start_machine)
+        .ok_or_else(|| LoweringError::UnknownExpression(start_machine.clone()))?;
     Ok(NsmInstructions {
-        start_node: *machine_starts
-            .get(start_machine)
-            .ok_or_else(|| LoweringError::UnknownExpression(start_machine.clone()))?,
-        graph: elim,
+        start_node,
+        graph: deduped,
     })
 }
+
+
+//Merges all nodes with duplicate sets of out_edges.
+fn deduplicate(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
+    let mut res: Graph<NsmEdgeData> = Graph::new();
+    let node_remap_table = build_node_remap_table(graph, &mut res);
+    dbg!(&node_remap_table);
+    let new_edges: Vec<Edge<NsmEdgeData>> = graph
+        .edges
+        .iter()
+        .map(|edge| {
+            let transition = match &edge.data.transition {
+                NsmEdgeTransition::Return => NsmEdgeTransition::Return,
+                NsmEdgeTransition::Consume(NsmConsumeEdge {
+                    char_match,
+                    target_node,
+                }) => NsmEdgeTransition::Consume(NsmConsumeEdge {
+                    char_match: char_match.clone(),
+                    target_node: remap_node(&node_remap_table, *target_node),
+                }),
+            };
+            let push_return_stack = edge
+                .data
+                .push_return_stack
+                .iter()
+                .map(|x| remap_node(&node_remap_table, *x))
+                .collect();
+            Edge {
+                data: NsmEdgeData {
+                    transition,
+                    actions: edge.data.actions.clone(),
+                    push_return_stack,
+                },
+            }
+        })
+        .collect();
+    res.edges = new_edges;
+    res
+}
+
+fn build_node_remap_table(graph: &Graph<NsmEdgeData>, res: &mut Graph<NsmEdgeData>) -> Vec<usize> {
+    let mut nodes: Vec<(usize, Vec<NsmEdgeData>)> = graph
+        .nodes
+        .iter()
+        .map(|node| node.out_edges.iter().map(|edge_idx|graph.get_edge(*edge_idx).data.clone()).collect())
+        .enumerate()
+        .collect();
+    //Sort by edge data to identify duplicates.
+    nodes.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut node_remap_table = vec![0; nodes.len()];
+    let mut remap_counter = 0;
+    //The 0th node is always remapped to itself.
+    let first_node = res.create_node();
+    res.get_node_mut(first_node).out_edges = graph.get_node(NodeIndex(0)).out_edges.clone();
+    for i in 1..nodes.len() {
+        if Some(&nodes[i].1) != nodes.get(i - 1).map(|x| &x.1) {
+            let node_idx= res.create_node();
+            res.get_node_mut(node_idx).out_edges = graph.get_node(NodeIndex(i)).out_edges.clone();
+            remap_counter += 1;
+        }
+        node_remap_table[i] = remap_counter;
+    }
+    node_remap_table
+}
+fn remap_node(table: &Vec<usize>, node_index: NodeIndex) -> NodeIndex {
+    NodeIndex(table[node_index.0])
+}
+//Returns a graph mapping from nodes to possible callers for return nodes.
+//There is no particular order for the callers.
+fn possible_callers(graph: &Graph<NsmEdgeData>) -> Graph<()> {
+    let mut res: Graph<()> = Graph::new();
+    for _ in 0..graph.nodes.len() {
+        res.create_node();
+    }
+    for node in &graph.nodes {
+        for &edge in &node.out_edges {
+            let edge = graph.get_edge(edge);
+        }
+    }
+    res
+}
+fn prune_dead_nodes(graph: &Graph<NsmEdgeData>, start_node: NodeIndex) {
+    let mut reachable_nodes_from_start: Vec<bool> = vec![false; graph.nodes.len()];
+    let mut reachable_edges_from_start: Vec<bool> = vec![false; graph.edges.len()];
+}
+
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
 // For each node, an edge is in its out_edges iff it starts at the node.
@@ -125,6 +216,12 @@ pub struct Graph<EdgeData> {
 }
 
 impl<EdgeData> Graph<EdgeData> {
+    fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
     fn create_node(&mut self) -> NodeIndex {
         self.nodes.push(Node {
             out_edges: VecDeque::new(),
@@ -133,6 +230,9 @@ impl<EdgeData> Graph<EdgeData> {
     }
     fn get_node(&self, idx: NodeIndex) -> &Node {
         &self.nodes[idx.0]
+    }
+    fn get_node_mut(&mut self, idx: NodeIndex) -> &mut Node {
+        &mut self.nodes[idx.0]
     }
     fn get_edge(&self, idx: EdgeIndex) -> &Edge<EdgeData> {
         &self.edges[idx.0]
@@ -160,31 +260,27 @@ struct ReturnRef {
     node: NodeIndex,
     prior: usize,
 }
-struct PathData<'a> {
-    actions: Vec<&'a Vec<Action>>,
+
+struct RewindableStack {
     // Each node in the list points back to the prior call stack, effectively
     // forming a linked list.
     return_stacks: Vec<Option<ReturnRef>>,
 }
 
-impl<'a> PathData<'a> {
+impl RewindableStack {
     fn new() -> Self {
-        PathData {
-            actions: Vec::new(),
-            return_stacks: Vec::new(),
+        RewindableStack {
+            //Start with an empty stack at index 0. This simplifies later code. This must not be popped.
+            return_stacks: vec![None],
         }
     }
 
-    // Simulates following an edge. If this method returns None, then there was a return action with
-    // no known caller. Returns the destination node.
     fn follow_edge(
         &mut self,
-        graph: &'a Graph<EpsNsmEdgeData>,
+        graph: &Graph<EpsNsmEdgeData>,
         edge_index: EdgeIndex,
     ) -> Option<NodeIndex> {
-        assert!(self.actions.len() == self.return_stacks.len());
         let edge = graph.get_edge(edge_index);
-        self.actions.push(&edge.data.actions);
         match &edge.data.target {
             // In this case, the edge's target is a node index. So
             // push the actions.
@@ -199,7 +295,7 @@ impl<'a> PathData<'a> {
                         .push(self.return_stacks[ret.prior].clone());
                     Some(ret.node)
                 } else {
-                    //Push a none here to keep the return stacks and action stacks balanced
+                    //Push a none here to match the future pop.
                     self.return_stacks.push(None);
                     None
                 }
@@ -214,10 +310,57 @@ impl<'a> PathData<'a> {
             }
         }
     }
+
+    fn len(&self) -> usize {
+        return self.return_stacks.len() - 1;
+    }
+    //Reverses the latest actions.
+    fn pop(&mut self) {
+        //The stack at index 0 is a guard and must not be popped.
+        assert!(self.return_stacks.len() > 1);
+        self.return_stacks.pop();
+    }
+
+    fn get_return_stack(&self) -> Vec<NodeIndex> {
+        let mut res = Vec::new();
+        let mut idx = self.return_stacks.len() - 1;
+        while let Some(ret) = &self.return_stacks[idx] {
+            res.push(ret.node);
+            idx = ret.prior;
+        }
+        res.reverse();
+        res
+    }
+}
+struct PathData<'a> {
+    actions: Vec<&'a Vec<Action>>,
+    stack: RewindableStack,
+}
+
+impl<'a> PathData<'a> {
+    fn new() -> Self {
+        PathData {
+            actions: vec![],
+            stack: RewindableStack::new(),
+        }
+    }
+
+    // Simulates following an edge. If this method returns None, then there was a return action with
+    // no known caller. Returns the destination node.
+    fn follow_edge(
+        &mut self,
+        graph: &'a Graph<EpsNsmEdgeData>,
+        edge_index: EdgeIndex,
+    ) -> Option<NodeIndex> {
+        assert!(self.actions.len() == self.stack.len());
+        let edge = graph.get_edge(edge_index);
+        self.actions.push(&edge.data.actions);
+        self.stack.follow_edge(graph, edge_index)
+    }
     //Reverses the latest actions.
     fn pop(&mut self) {
         self.actions.pop();
-        self.return_stacks.pop();
+        self.stack.pop();
     }
 
     fn get_actions(&self) -> Vec<Action> {
@@ -228,6 +371,10 @@ impl<'a> PathData<'a> {
             }
         }
         res
+    }
+
+    fn get_return_stack(&self) -> Vec<NodeIndex> {
+        self.stack.get_return_stack()
     }
 }
 //Takes in an epsilon graph and the accepting nodes. Returns an equivilent graph that has had epsilon elimination performed.
@@ -282,6 +429,7 @@ fn replace_with_epsilon_closure<'a>(
                             target_node: next_node,
                         }),
                         actions: new_actions,
+                        push_return_stack: path.get_return_stack(),
                     },
                 );
             } else {
@@ -298,11 +446,13 @@ fn replace_with_epsilon_closure<'a>(
             //In this branch, there was a return but no known caller. The process must stop here due to this.
             //Instead, Depth First Search at runtime must be used.
             let new_actions = path.get_actions();
+            //Push return stack is  because if it wasn't, there would be a known node to return to.
             new_graph.add_edge_lowest_priority(
                 context.start,
                 NsmEdgeData {
                     transition: NsmEdgeTransition::Return,
                     actions: new_actions,
+                    push_return_stack: Vec::new(),
                 },
             );
         }
@@ -349,13 +499,13 @@ fn lower_nsm_rec(
             );
             Ok(end_node)
         }
-        GrammarEx::CharRange(range) => {
+        GrammarEx::CharRangeInclusive(m, n) => {
             let end_node = graph.create_node();
             graph.add_edge_lowest_priority(
                 start_node,
                 EpsNsmEdgeData {
                     target: EdgeTarget::NodeIndex(end_node),
-                    char_match: EpsCharMatch::Match(CharClass::Range(range)),
+                    char_match: EpsCharMatch::Match(CharClass::RangeInclusive(m,n)),
                     actions: vec![],
                 },
             );
@@ -433,7 +583,7 @@ fn lower_nsm_rec(
                 EpsNsmEdgeData {
                     target: EdgeTarget::Call(call_data),
                     char_match: EpsCharMatch::Epsilon,
-                    actions: vec![Action::Assign("%RET".to_string(), var)],
+                    actions: vec![],
                 },
             );
             Ok(return_node)
@@ -473,9 +623,20 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr);
-        let machine =  compile( machines,
-            &start,
-        ).unwrap();
+        let machine = compile(machines, &start).unwrap();
+        dbg!(machine);
+    }
+
+    #[test]
+    fn test_compile_machine_multi() {
+        let expr_one = parse_grammarex(&mut r#" abc = second "#).unwrap();
+        let expr_two = parse_grammarex(&mut r#"[abc]"#).unwrap();
+        let start = "start".to_string();
+        let second = "second".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr_one);
+        machines.insert(second.clone(), expr_two);
+        let machine = compile(machines, &start).unwrap();
         dbg!(machine);
     }
 }
