@@ -1,4 +1,5 @@
 use std::{
+    cmp::min,
     collections::{HashMap, HashSet, VecDeque},
 };
 
@@ -111,7 +112,7 @@ pub fn compile(
         end_nodes.insert(machine.0.clone(), end_node);
     }
     let elim = eliminate_epsilon(&graph);
-    let deduped = deduplicate(&elim);
+    let deduped = full_dedup(&elim);
     let start_node = *machine_starts
         .get(start_machine)
         .ok_or_else(|| LoweringError::UnknownExpression(start_machine.clone()))?;
@@ -121,12 +122,99 @@ pub fn compile(
     })
 }
 
-
-//Merges all nodes with duplicate sets of out_edges.
-fn deduplicate(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
+//Removes all unused edges from the graph.
+fn remove_unused_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
     let mut res: Graph<NsmEdgeData> = Graph::new();
-    let node_remap_table = build_node_remap_table(graph, &mut res);
-    dbg!(&node_remap_table);
+    let mut live_edges = vec![false; graph.edges.len()];
+    for i in 0..graph.nodes.len() {
+        for &edge_idx in &graph.get_node(NodeIndex(i)).out_edges {
+            live_edges[edge_idx.0] = true;
+        }
+    }
+    let mut remap_table = vec![0; graph.edges.len()];
+    let mut new_edges = Vec::new();
+    for i in 0..live_edges.len() {
+        if live_edges[i] {
+            remap_table[i] = new_edges.len();
+            new_edges.push(graph.get_edge(EdgeIndex(i)).clone());
+        }
+    }
+    for node in &graph.nodes {
+        let node_idx = res.create_node();
+        res.get_node_mut(node_idx).out_edges = node
+            .out_edges
+            .iter()
+            .map(|x| EdgeIndex(remap_table[x.0]))
+            .collect();
+    }
+    res.edges = new_edges;
+    res
+}
+
+fn deduplicate_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
+    let mut edge_idx: Vec<(usize, &Edge<NsmEdgeData>)> = graph.edges.iter().enumerate().collect();
+    edge_idx.sort_by(|edge1, edge2| edge1.1.data.cmp(&edge2.1.data));
+    let mut remap_table = vec![0; graph.edges.len()];
+    remap_table[edge_idx[0].0] = 0;
+    let mut new_edges = Vec::new();
+    new_edges.push(graph.get_edge(EdgeIndex(edge_idx[0].0)).clone());
+    for i in 1..graph.edges.len() {
+        if edge_idx[i].1.data != edge_idx[i-1].1.data {
+            new_edges.push(graph.get_edge(EdgeIndex(edge_idx[i].0)).clone());
+        }
+        remap_table[edge_idx[i].0] = new_edges.len()-1;
+    }
+    
+    let mut res: Graph<NsmEdgeData> = Graph::new();
+    for node in &graph.nodes {
+        let node_idx = res.create_node();
+        let mut new_out_edges: Vec<_>= 
+            node
+            .out_edges
+            .iter() 
+            .map(|x| EdgeIndex(remap_table[x.0]))
+            .collect();
+        new_out_edges.sort();
+        new_out_edges.dedup();
+        res.get_node_mut(node_idx).out_edges = new_out_edges.into();
+    }
+    res.edges = new_edges;
+    res
+}
+//Merges all nodes with duplicate sets of out_edges. Out edges are duplicate
+//if they are in the same order, point to the same nodes and have the same actions.
+fn deduplicate_nodes(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
+    let (node_remap_table, count) = build_node_deduplicate_remap_table(graph);
+    remap_graph_nodes(graph, &node_remap_table, count)
+}
+
+//Performs a full deduplication of the graph. 
+//This deduplicates all identical edges and all nodes that have the same
+//out edges. It then prunes unused edges.
+fn full_dedup(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
+    let mut graph = deduplicate_edges(graph);
+    loop {
+        let (node_remap_table, count) = build_node_deduplicate_remap_table(&graph);
+        if count == graph.nodes.len() {
+            break;
+        }
+        graph = remap_graph_nodes(&graph, &node_remap_table, count);
+        graph = deduplicate_edges(&graph);
+    }
+    remove_unused_edges(&graph)
+}
+//Takes in a graph, a mapping from node to node and the number of nodes in the remapped graph.
+//It maps the ndoes and edges from the original graph to new ones following the table. 
+//If multiple nodes are mapped onto the same node, all of their edges will be 
+//concatenated.
+fn remap_graph_nodes(graph: &Graph<NsmEdgeData>, node_remap_table: &Vec<usize>, new_node_count: usize) -> Graph<NsmEdgeData> {
+    let mut res: Graph<NsmEdgeData> = Graph::new();
+    for _ in 0..new_node_count {
+        res.create_node();
+    }
+    for node in graph.nodes() {
+        res.get_node_mut(remap_node(node_remap_table, node)).out_edges.append(&mut graph.get_node(node).out_edges.clone());
+    }
     let new_edges: Vec<Edge<NsmEdgeData>> = graph
         .edges
         .iter()
@@ -160,11 +248,15 @@ fn deduplicate(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
     res
 }
 
-fn build_node_remap_table(graph: &Graph<NsmEdgeData>, res: &mut Graph<NsmEdgeData>) -> Vec<usize> {
-    let mut nodes: Vec<(usize, Vec<NsmEdgeData>)> = graph
+//This builds a remapping table for deduplicting nodes.
+//Precondition: Edges must have been deduplicated first.
+fn build_node_deduplicate_remap_table(graph: &Graph<NsmEdgeData>) -> (Vec<usize>, usize) {
+    let mut nodes: Vec<(usize, VecDeque<EdgeIndex>)> = graph
         .nodes
         .iter()
-        .map(|node| node.out_edges.iter().map(|edge_idx|graph.get_edge(*edge_idx).data.clone()).collect())
+        .map(|node| {
+            node.out_edges.clone()
+        })
         .enumerate()
         .collect();
     //Sort by edge data to identify duplicates.
@@ -172,24 +264,121 @@ fn build_node_remap_table(graph: &Graph<NsmEdgeData>, res: &mut Graph<NsmEdgeDat
     let mut node_remap_table = vec![0; nodes.len()];
     let mut remap_counter = 0;
     //The 0th node is always remapped to itself.
-    let first_node = res.create_node();
-    res.get_node_mut(first_node).out_edges = graph.get_node(NodeIndex(0)).out_edges.clone();
+    node_remap_table[0] = 0;
     for i in 1..nodes.len() {
         if Some(&nodes[i].1) != nodes.get(i - 1).map(|x| &x.1) {
-            let node_idx= res.create_node();
-            res.get_node_mut(node_idx).out_edges = graph.get_node(NodeIndex(i)).out_edges.clone();
             remap_counter += 1;
         }
         node_remap_table[i] = remap_counter;
     }
-    node_remap_table
+    (node_remap_table, remap_counter + 1)
 }
 fn remap_node(table: &Vec<usize>, node_index: NodeIndex) -> NodeIndex {
     NodeIndex(table[node_index.0])
 }
-//Returns a graph mapping from nodes to possible callers for return nodes.
-//There is no particular order for the callers.
-fn possible_callers(graph: &Graph<NsmEdgeData>) -> Graph<()> {
+
+//Identifies the strongly connected components in the graph
+//among edges that aren't call or return edges.
+//The result of this function is a topological sort.
+fn identify_scc(graph: &Graph<NsmEdgeData>) -> Vec<usize>{
+    let n = graph.nodes.len();
+    let mut index = 1;
+    let mut on_stack = vec![false; n];
+    let mut indexs = vec![0; n];
+    let mut lowlinks = vec![0; n];
+    let mut mapping_table = vec![0; n];
+    let mut scc_count = 0;
+    let mut stack = vec![];
+    for i in 0..n {
+        if indexs[i] == 0 {
+            contract_scc_rec(
+                graph,
+                &mut index,
+                &mut on_stack,
+                &mut indexs,
+                &mut lowlinks,
+                &mut stack,
+                &mut mapping_table,
+                &mut scc_count,
+                NodeIndex(i),
+            );
+        }
+    }
+    mapping_table
+}
+
+fn contract_scc_rec(
+    graph: &Graph<NsmEdgeData>,
+    index: &mut usize,
+    on_stack: &mut Vec<bool>,
+    indexs: &mut Vec<usize>,
+    lowlinks: &mut Vec<usize>,
+    stack: &mut Vec<usize>,
+    mapping_table: &mut Vec<usize>,
+    scc_count: &mut usize,
+    node_index: NodeIndex,
+) {
+    indexs[node_index.0] = *index;
+    lowlinks[node_index.0] = *index;
+    *index += 1;
+    stack.push(node_index.0);
+    on_stack[node_index.0] = true;
+
+    let node = graph.get_node(node_index);
+    for edge_idx in &node.out_edges {
+        let edge_data = &graph.get_edge(*edge_idx).data;
+        if let NsmEdgeTransition::Consume(target) = &edge_data.transition {
+            let target = target.target_node;
+            if edge_data.push_return_stack.len() == 0 {
+                if indexs[target.0] == 0 {
+                    contract_scc_rec(
+                        graph,
+                        index,
+                        on_stack,
+                        indexs,
+                        lowlinks,
+                        stack,
+                        mapping_table,
+                        scc_count,
+                        target,
+                    );
+                    lowlinks[node_index.0] = min(lowlinks[node_index.0], lowlinks[target.0]);
+                } else if on_stack[target.0] {
+                    lowlinks[node_index.0] = min(lowlinks[node_index.0], lowlinks[target.0]);
+                }
+
+            }
+        }
+    }
+    if lowlinks[node_index.0] == indexs[node_index.0] {
+        while let Some(node) = stack.pop() {
+            on_stack[node] = false;
+            mapping_table[node] = *scc_count;
+            if node == node_index.0 {
+                break;
+            }
+        }
+        *scc_count += 1;
+    }
+}
+
+//Returns a summary of which nodes are reachable from which other nodes starting
+//and ending with an empty stack.
+fn reachability_summary(graph: &Graph<NsmEdgeData>) -> Graph<()> {
+    let mut table = Vec::new();
+    let contains_return = contains_return_edge(graph);
+    for _ in 0..graph.nodes.len() {
+        table.push(vec![false; graph.nodes.len()]);
+    }
+    for i in 0..graph.nodes.len() {
+        let node = graph.get_node(NodeIndex(i));
+        for edge_idx in &node.out_edges {
+            let edge_data = &graph.get_edge(*edge_idx).data;
+            if let NsmEdgeTransition::Consume(transition) = &edge_data.transition {
+                table[i][transition.target_node.0] = true;
+            }
+        }
+    }
     let mut res: Graph<()> = Graph::new();
     for _ in 0..graph.nodes.len() {
         res.create_node();
@@ -201,9 +390,17 @@ fn possible_callers(graph: &Graph<NsmEdgeData>) -> Graph<()> {
     }
     res
 }
-fn prune_dead_nodes(graph: &Graph<NsmEdgeData>, start_node: NodeIndex) {
-    let mut reachable_nodes_from_start: Vec<bool> = vec![false; graph.nodes.len()];
-    let mut reachable_edges_from_start: Vec<bool> = vec![false; graph.edges.len()];
+
+fn contains_return_edge(graph: &Graph<NsmEdgeData>) -> Vec<bool> {
+    let mut res = vec![false; graph.nodes.len()];
+    for i in 0..graph.nodes.len() {
+        let node = graph.get_node(NodeIndex(i));
+        for edge_idx in &node.out_edges {
+            let edge_data = &graph.get_edge(*edge_idx).data;
+            res[i] = res[i] || edge_data.transition == NsmEdgeTransition::Return;
+        }
+    }
+    res
 }
 
 // Invariants:
@@ -233,6 +430,9 @@ impl<EdgeData> Graph<EdgeData> {
     }
     fn get_node_mut(&mut self, idx: NodeIndex) -> &mut Node {
         &mut self.nodes[idx.0]
+    }
+    fn nodes(&self) -> impl Iterator<Item = NodeIndex> {
+        (0..self.nodes.len()).map(|x| NodeIndex(x))
     }
     fn get_edge(&self, idx: EdgeIndex) -> &Edge<EdgeData> {
         &self.edges[idx.0]
@@ -505,7 +705,7 @@ fn lower_nsm_rec(
                 start_node,
                 EpsNsmEdgeData {
                     target: EdgeTarget::NodeIndex(end_node),
-                    char_match: EpsCharMatch::Match(CharClass::RangeInclusive(m,n)),
+                    char_match: EpsCharMatch::Match(CharClass::RangeInclusive(m, n)),
                     actions: vec![],
                 },
             );
@@ -619,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_compile_machine() {
-        let expr = parse_grammarex(&mut "[abc]").unwrap();
+        let expr = parse_grammarex(&mut "[cba]").unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr);
