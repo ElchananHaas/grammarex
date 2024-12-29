@@ -1,3 +1,4 @@
+use core::num;
 use std::{
     cmp::min,
     collections::{HashMap, HashSet, VecDeque},
@@ -180,12 +181,6 @@ fn deduplicate_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
     res.edges = new_edges;
     res
 }
-//Merges all nodes with duplicate sets of out_edges. Out edges are duplicate
-//if they are in the same order, point to the same nodes and have the same actions.
-fn deduplicate_nodes(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
-    let (node_remap_table, count) = build_node_deduplicate_remap_table(graph);
-    remap_graph_nodes(graph, &node_remap_table, count)
-}
 
 //Performs a full deduplication of the graph.
 //This deduplicates all identical edges and all nodes that have the same
@@ -266,7 +261,8 @@ fn build_node_deduplicate_remap_table(graph: &Graph<NsmEdgeData>) -> (Vec<usize>
     nodes.sort_by(|a, b| a.1.cmp(&b.1));
     let mut node_remap_table = vec![0; nodes.len()];
     let mut remap_counter = 0;
-    //The 0th node is always remapped to itself.
+    //The 0th node is always remapped to itself. Technically not needed because the array
+    //is initializaed to 0 but I am leaving it for clarity.
     node_remap_table[0] = 0;
     for i in 1..nodes.len() {
         if Some(&nodes[i].1) != nodes.get(i - 1).map(|x| &x.1) {
@@ -281,9 +277,10 @@ fn remap_node(table: &Vec<usize>, node_index: NodeIndex) -> NodeIndex {
 }
 
 //Identifies the strongly connected components in the graph
-//among edges that aren't call or return edges.
-//The result of this function is a topological sort.
-fn identify_scc(graph: &Graph<NsmEdgeData>) -> Vec<usize> {
+//among consume edges.
+//The function returns a table mapping nodes to their SCC and the count of SCCs.
+//The result of this function is a topological sort of the SCCs.
+fn identify_scc(graph: &Graph<NsmEdgeData>) -> (Vec<usize>, usize) {
     let n = graph.nodes.len();
     let mut index = 1;
     let mut on_stack = vec![false; n];
@@ -294,7 +291,7 @@ fn identify_scc(graph: &Graph<NsmEdgeData>) -> Vec<usize> {
     let mut stack = vec![];
     for i in 0..n {
         if indexs[i] == 0 {
-            contract_scc_rec(
+            identify_scc_rec(
                 graph,
                 &mut index,
                 &mut on_stack,
@@ -307,10 +304,10 @@ fn identify_scc(graph: &Graph<NsmEdgeData>) -> Vec<usize> {
             );
         }
     }
-    mapping_table
+    (mapping_table, scc_count)
 }
 
-fn contract_scc_rec(
+fn identify_scc_rec(
     graph: &Graph<NsmEdgeData>,
     index: &mut usize,
     on_stack: &mut Vec<bool>,
@@ -334,7 +331,7 @@ fn contract_scc_rec(
             let target = target.target_node;
             if edge_data.push_return_stack.len() == 0 {
                 if indexs[target.0] == 0 {
-                    contract_scc_rec(
+                    identify_scc_rec(
                         graph,
                         index,
                         on_stack,
@@ -366,45 +363,98 @@ fn contract_scc_rec(
 
 //Returns a summary of which nodes are reachable from which other nodes starting
 //and ending with an empty stack.
-fn reachability_summary(graph: &Graph<NsmEdgeData>) -> Graph<()> {
-    let mut table = Vec::new();
-    let contains_return = contains_return_edge(graph);
-    for _ in 0..graph.nodes.len() {
-        table.push(vec![false; graph.nodes.len()]);
+fn reachability_summary(in_graph: &Graph<NsmEdgeData>) -> (Graph<NsmEdgeData>, Vec<usize>) {
+    //This overall mapping holds what nodes are mapped to in the resulting graph.
+    let mut overall_mapping: Vec<usize> = (0..in_graph.nodes.len()).collect();
+    let mut contracted;
+    loop {
+        let (scc, num_scc) = identify_scc(in_graph);
+        for i in 0..scc.len() {
+            overall_mapping[i] = scc[overall_mapping[i]];
+        }
+        contracted = remap_graph_nodes(&in_graph, &scc, num_scc);
+        dedup_summary_edges(&mut contracted);
+        let can_reach_return = can_reach_return(&contracted);
+        let mut made_progress = false;
+        for i in 0..contracted.nodes.len() {
+            for &edge in &contracted.get_node(NodeIndex(i)).out_edges.clone() {
+                let edge_data = &mut contracted.get_edge_mut(edge).data;
+                if let NsmEdgeTransition::Consume(nsm_consume_edge) = &edge_data.transition.clone() {
+                    while let Some(node) = edge_data.push_return_stack.pop() {
+                        if !can_reach_return[node.0] {
+                            edge_data.push_return_stack.push(node);
+                            break;
+                        }
+                        made_progress = true;
+                        edge_data.transition = NsmEdgeTransition::Consume(NsmConsumeEdge {
+                            char_match: nsm_consume_edge.char_match.clone(),
+                            target_node: node,
+                        });
+                    }
+                }
+            }
+        }
+        if !made_progress {
+            break;
+        }
     }
-    for i in 0..graph.nodes.len() {
-        let node = graph.get_node(NodeIndex(i));
-        for edge_idx in &node.out_edges {
-            let edge_data = &graph.get_edge(*edge_idx).data;
-            if let NsmEdgeTransition::Consume(transition) = &edge_data.transition {
-                table[i][transition.target_node.0] = true;
+    (contracted, overall_mapping)
+}
+
+fn can_reach_return(contracted: &Graph<NsmEdgeData>) -> Vec<bool> { 
+    let mut can_reach_return = vec![false; contracted.nodes.len()];
+    //First, mark the nodes that can reach a return. Since identify_scc returns a topologically sorted
+    //graph, all thats needed is a single pass.
+    for i in 0..contracted.nodes.len() {
+        for &edge in &contracted.get_node(NodeIndex(i)).out_edges {
+            let edge_data = &contracted.get_edge(edge).data;
+            match &edge_data.transition {
+                NsmEdgeTransition::Consume(nsm_consume_edge) => {
+                    if edge_data.push_return_stack.len() == 0 {
+                        can_reach_return[i] =
+                            can_reach_return[i] || can_reach_return[nsm_consume_edge.target_node.0];
+                    }
+                }
+                NsmEdgeTransition::Return => {
+                    can_reach_return[i] = true;
+                }
             }
         }
     }
-    let mut res: Graph<()> = Graph::new();
-    for _ in 0..graph.nodes.len() {
-        res.create_node();
-    }
-    for node in &graph.nodes {
-        for &edge in &node.out_edges {
-            let edge = graph.get_edge(edge);
-        }
-    }
-    res
+    can_reach_return
 }
-
-fn contains_return_edge(graph: &Graph<NsmEdgeData>) -> Vec<bool> {
-    let mut res = vec![false; graph.nodes.len()];
-    for i in 0..graph.nodes.len() {
-        let node = graph.get_node(NodeIndex(i));
-        for edge_idx in &node.out_edges {
-            let edge_data = &graph.get_edge(*edge_idx).data;
-            res[i] = res[i] || edge_data.transition == NsmEdgeTransition::Return;
-        }
+//Deduplicates all edges that are equivilent within the summary.
+fn dedup_summary_edges(contracted: &mut Graph<NsmEdgeData>) {
+    fn map_key(data: &NsmEdgeData) -> (NsmEdgeTransition, &Vec<NodeIndex>) {
+        let transition_mapped = match &data.transition {
+            NsmEdgeTransition::Consume(nsm_consume_edge) => {
+                NsmEdgeTransition::Consume(NsmConsumeEdge {
+                    char_match: CharClass::Char('_'),
+                    target_node: nsm_consume_edge.target_node,
+                })
+            }
+            NsmEdgeTransition::Return => NsmEdgeTransition::Return,
+        };
+        (transition_mapped, &data.push_return_stack)
     }
-    res
+    for node in contracted.nodes() {
+        let mut edges_vec: Vec<_> = contracted
+            .get_node_mut(node)
+            .out_edges
+            .clone()
+            .into_iter()
+            .collect();
+        edges_vec.sort_by(|a, b| {
+            map_key(&contracted.get_edge(*a).data).cmp(&map_key(&contracted.get_edge(*b).data))
+        });
+        edges_vec.dedup_by(|a, b| {
+            map_key(&contracted.get_edge(*a).data) == map_key(&contracted.get_edge(*b).data)
+        });
+        contracted
+            .get_node_mut(node)
+            .out_edges = edges_vec.into();
+    }
 }
-
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
 // For each node, an edge is in its out_edges iff it starts at the node.
@@ -438,6 +488,9 @@ impl<EdgeData> Graph<EdgeData> {
     }
     fn get_edge(&self, idx: EdgeIndex) -> &Edge<EdgeData> {
         &self.edges[idx.0]
+    }
+    fn get_edge_mut(&mut self, idx: EdgeIndex) -> &mut Edge<EdgeData> {
+        &mut self.edges[idx.0]
     }
     fn add_edge_lowest_priority(&mut self, start: NodeIndex, data: EdgeData) {
         let idx = self.edges.len();
