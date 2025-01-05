@@ -15,7 +15,7 @@ pub struct Edge<EdgeData> {
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
 // For each node, an edge is in its out_edges iff it starts at the node.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Graph<EdgeData> {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge<EdgeData>>,

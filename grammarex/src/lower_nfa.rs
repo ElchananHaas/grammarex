@@ -103,9 +103,10 @@ pub fn compile(
     let start_node = *machine_starts
         .get(start_machine)
         .ok_or_else(|| LoweringError::UnknownExpression(start_machine.clone()))?;
+    let pruned = prune_dead_nodes(&deduped, start_node);
     Ok(NsmInstructions {
         start_node,
-        graph: deduped,
+        graph: pruned,
     })
 }
 
@@ -316,20 +317,42 @@ fn identify_scc_rec(
     }
 }
 
+//This discards all char match and action data for computing the reachability summary.
+fn map_for_reachability_summary(in_graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
+    let mut res = in_graph.clone();
+    for i in 0..in_graph.edges.len() {
+        let data = &mut res.get_edge_mut(i).data;
+        data.actions = vec![];
+        data.transition = match &data.transition {
+            NsmEdgeTransition::Consume(nsm_consume_edge) => {
+                NsmEdgeTransition::Consume(NsmConsumeEdge {
+                    char_match: CharClass::Char('a'),
+                    target_node: nsm_consume_edge.target_node,
+                })
+            },
+            NsmEdgeTransition::Return =>  NsmEdgeTransition::Return,
+        }
+    }
+    res
+}
+
 //Returns a summary of which nodes are reachable from which other nodes starting
 //and ending with an empty stack.
 fn reachability_summary(in_graph: &Graph<NsmEdgeData>) -> (Graph<NsmEdgeData>, Vec<usize>) {
     //This overall mapping holds what nodes are mapped to in the resulting graph.
     let mut overall_mapping: Vec<usize> = (0..in_graph.nodes.len()).collect();
-    let mut contracted;
+    let mut contracted = map_for_reachability_summary(in_graph);
+    contracted = deduplicate_edges(&contracted);
+    dbg!(&contracted);
     loop {
-        let (scc, num_scc) = identify_scc(in_graph);
+        let (scc, num_scc) = identify_scc(&contracted);
         for i in 0..scc.len() {
             overall_mapping[i] = scc[overall_mapping[i]];
         }
         let remap_table = scc.iter().map(|x| Some(*x)).collect();
-        contracted = in_graph.remap_nodes(&remap_table, num_scc);
-        dedup_summary_edges(&mut contracted);
+        contracted = contracted.remap_nodes(&remap_table, num_scc);
+        dbg!(&contracted);
+        contracted = deduplicate_edges(&contracted);
         let can_reach_return = can_reach_return(&contracted);
         let mut made_progress = false;
         for i in 0..contracted.nodes.len() {
@@ -341,7 +364,7 @@ fn reachability_summary(in_graph: &Graph<NsmEdgeData>) -> (Graph<NsmEdgeData>, V
                             edge_data.push_return_stack.push(node);
                             break;
                         }
-                        made_progress = true;
+                        //made_progress = true;
                         edge_data.transition = NsmEdgeTransition::Consume(NsmConsumeEdge {
                             char_match: nsm_consume_edge.char_match.clone(),
                             target_node: node,
@@ -379,45 +402,12 @@ fn can_reach_return(contracted: &Graph<NsmEdgeData>) -> Vec<bool> {
     }
     can_reach_return
 }
-//Deduplicates all edges that are equivilent within the summary.
-fn dedup_summary_edges(contracted: &mut Graph<NsmEdgeData>) {
-    fn map_key(data: &NsmEdgeData) -> (NsmEdgeTransition, &Vec<usize>) {
-        let transition_mapped = match &data.transition {
-            NsmEdgeTransition::Consume(nsm_consume_edge) => {
-                NsmEdgeTransition::Consume(NsmConsumeEdge {
-                    char_match: CharClass::Char('_'),
-                    target_node: nsm_consume_edge.target_node,
-                })
-            }
-            NsmEdgeTransition::Return => NsmEdgeTransition::Return,
-        };
-        (transition_mapped, &data.push_return_stack)
-    }
-    for node in contracted.nodes() {
-        let mut edges_vec: Vec<_> = contracted
-            .get_node_mut(node)
-            .out_edges
-            .clone()
-            .into_iter()
-            .collect();
-        edges_vec.sort_by(|a, b| {
-            map_key(&contracted.get_edge(*a).data).cmp(&map_key(&contracted.get_edge(*b).data))
-        });
-        edges_vec.dedup_by(|a, b| {
-            map_key(&contracted.get_edge(*a).data) == map_key(&contracted.get_edge(*b).data)
-        });
-        contracted
-            .get_node_mut(node)
-            .out_edges = edges_vec.into();
-    }
-}
-
 
 fn identify_live_nodes(in_graph: &Graph<NsmEdgeData>, start: usize) -> Vec<bool> {
     let (graph, mapping) = reachability_summary(in_graph);
+    dbg!(&graph, &mapping);
     let num_nodes = graph.nodes.len();
-    let start = mapping[start];
-    let mut to_process = vec![start];
+    let mut to_process = vec![mapping[start]];
     //If a node can't be reached from the start it is dead.
     let mut processed = vec![false; num_nodes];
     while let Some(node) = to_process.pop() {
@@ -436,6 +426,7 @@ fn identify_live_nodes(in_graph: &Graph<NsmEdgeData>, start: usize) -> Vec<bool>
     }
     //If a node can't reach a return, it is dead.
     let can_reach_return = can_reach_return(&graph);
+    dbg!(&processed, &can_reach_return);
     let mut live = vec![false; num_nodes];
     for i in 0..num_nodes {
         live[i] = can_reach_return[i] && processed[i];
@@ -461,10 +452,11 @@ pub fn liveness_to_remapping(live: &Vec<bool>) -> (Vec<Option<usize>>, usize) {
     (res, live_count)
 }
 
-fn prune_dead_nodes(in_graph: &Graph<NsmEdgeData>, start: usize) {
+fn prune_dead_nodes(in_graph: &Graph<NsmEdgeData>, start: usize) -> Graph<NsmEdgeData> {
     let node_liveness = identify_live_nodes(in_graph, start);
-    let remapping = liveness_to_remapping(&node_liveness);
-
+    let (remapping, node_count) = liveness_to_remapping(&node_liveness);
+    let res = in_graph.remap_nodes(&remapping, node_count);
+    res
 }
 struct ElimContext<'a> {
     start: usize,
