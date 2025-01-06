@@ -19,15 +19,18 @@ pub struct Edge<EdgeData> {
 pub struct Graph<EdgeData> {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge<EdgeData>>,
+    pub start_node: Option<usize>,
 }
 
 impl<EdgeData> Graph<EdgeData> {
-    pub fn new() -> Self {
+    pub fn new(start_node: Option<usize>) -> Self {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            start_node
         }
     }
+
     pub fn create_node(&mut self) -> usize {
         self.nodes.push(Node {
             out_edges: VecDeque::new(),
@@ -83,7 +86,7 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
                    node_remap: &Vec<Option<usize>>, 
                    nodes_after_remap: usize) -> Self {
         assert_eq!(node_remap.len(),self.nodes.len());
-        let mut res = Self::new();
+        let mut res = Self::new(None);
         for _ in 0..nodes_after_remap {
             res.create_node();
         }
@@ -110,6 +113,7 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
         }
         res.sort_dedup_out_edges();
         res.edges = remapped_edges;
+        res.start_node = self.start_node.and_then(|start|node_remap[start]);
         res
     }
 }
