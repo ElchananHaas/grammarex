@@ -1,5 +1,4 @@
-use std::{collections::VecDeque};
-
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Node {
@@ -10,7 +9,6 @@ pub struct Node {
 pub struct Edge<EdgeData> {
     pub data: EdgeData,
 }
-
 
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
@@ -27,7 +25,7 @@ impl<EdgeData> Graph<EdgeData> {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
-            start_node
+            start_node,
         }
     }
 
@@ -77,15 +75,15 @@ impl<EdgeData> Graph<EdgeData> {
 pub trait Remappable {
     //Remaps the referenced nodes in an edge according to the remap table.
     //If this can't be done, return None.
-    fn remap(&self, remap: &Vec<Option<usize>>) -> Option<Self> where Self: Sized;
+    fn remap(&self, remap: &Vec<Option<usize>>) -> Option<Self>
+    where
+        Self: Sized;
 }
 
-impl<EdgeData: Remappable> Graph<EdgeData> { 
+impl<EdgeData: Remappable> Graph<EdgeData> {
     //Remaps graph nodes. All nodes that map to the same node_remap are merged.
-    pub fn remap_nodes(&self, 
-                   node_remap: &Vec<Option<usize>>, 
-                   nodes_after_remap: usize) -> Self {
-        assert_eq!(node_remap.len(),self.nodes.len());
+    pub fn remap_nodes(&self, node_remap: &Vec<Option<usize>>, nodes_after_remap: usize) -> Self {
+        assert_eq!(node_remap.len(), self.nodes.len());
         let mut res = Self::new(None);
         for _ in 0..nodes_after_remap {
             res.create_node();
@@ -95,9 +93,7 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
         for edge in &self.edges {
             if let Some(mapped_data) = edge.data.remap(node_remap) {
                 edge_remap_table.push(Some(remapped_edges.len()));
-                remapped_edges.push(Edge {
-                    data: mapped_data
-                });
+                remapped_edges.push(Edge { data: mapped_data });
             } else {
                 edge_remap_table.push(None);
             }
@@ -106,14 +102,16 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
             for &edge in &self.get_node(i).out_edges {
                 if let Some(mapped_edge) = edge_remap_table[edge] {
                     if let Some(mapped_node) = node_remap[i] {
-                        res.get_node_mut(mapped_node).out_edges.push_back(mapped_edge);
+                        res.get_node_mut(mapped_node)
+                            .out_edges
+                            .push_back(mapped_edge);
                     }
                 }
             }
         }
         res.sort_dedup_out_edges();
         res.edges = remapped_edges;
-        res.start_node = self.start_node.and_then(|start|node_remap[start]);
+        res.start_node = self.start_node.and_then(|start| node_remap[start]);
         res
     }
 }
