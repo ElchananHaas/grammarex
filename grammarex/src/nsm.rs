@@ -15,9 +15,9 @@ pub struct Edge<EdgeData> {
 // For each node, an edge is in its out_edges iff it starts at the node.
 #[derive(Debug, Clone)]
 pub struct Graph<EdgeData> {
+    pub start_node: Option<usize>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge<EdgeData>>,
-    pub start_node: Option<usize>,
 }
 
 impl<EdgeData> Graph<EdgeData> {
@@ -114,4 +114,5 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
         res.start_node = self.start_node.and_then(|start| node_remap[start]);
         res
     }
+
 }

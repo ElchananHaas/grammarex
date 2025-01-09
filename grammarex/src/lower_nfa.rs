@@ -65,7 +65,7 @@ pub struct CallData {
 #[derive(Clone, Debug)]
 pub enum EdgeTarget {
     Call(CallData),
-    usize(usize),
+    Node(usize),
     Return,
 }
 #[derive(Debug, Clone)]
@@ -99,12 +99,11 @@ pub fn compile(
         )?;
         end_nodes.insert(machine.0.clone(), end_node);
     }
-    pretty_print_graph(&graph);
     let elim = eliminate_epsilon(&graph);
-    pretty_print_graph(&elim);
     let deduped = full_dedup(&elim);
-    //let pruned = prune_dead_nodes(&deduped, start_node);
-    Ok(deduped)
+    pretty_print_graph(&deduped);
+    let pruned = prune_dead_nodes(&deduped, start_node);
+    Ok(pruned)
 }
 
 //Removes all unused edges from the graph.
@@ -358,7 +357,7 @@ fn reachability_summary(in_graph: &Graph<NsmEdgeData>) -> (Graph<NsmEdgeData>, V
                             edge_data.push_return_stack.push(node);
                             break;
                         }
-                        //made_progress = true;
+                        made_progress = true;
                         edge_data.transition = NsmEdgeTransition::Consume(NsmConsumeEdge {
                             char_match: nsm_consume_edge.char_match.clone(),
                             target_node: node,
@@ -483,7 +482,7 @@ impl RewindableStack {
         match &edge.data.target {
             // In this case, the edge's target is a node index. So
             // push the actions.
-            EdgeTarget::usize(target) => {
+            EdgeTarget::Node(target) => {
                 let current_return_ref = self.return_stacks.last().cloned().unwrap_or_else(|| None);
                 self.return_stacks.push(current_return_ref);
                 Some(*target)
@@ -682,7 +681,7 @@ fn lower_nsm_rec(
             graph.add_edge_lowest_priority(
                 start_node,
                 EpsNsmEdgeData {
-                    target: EdgeTarget::usize(end_node),
+                    target: EdgeTarget::Node(end_node),
                     char_match: EpsCharMatch::Match(CharClass::Char(c)),
                     actions: vec![],
                 },
@@ -694,7 +693,7 @@ fn lower_nsm_rec(
             graph.add_edge_lowest_priority(
                 start_node,
                 EpsNsmEdgeData {
-                    target: EdgeTarget::usize(end_node),
+                    target: EdgeTarget::Node(end_node),
                     char_match: EpsCharMatch::Match(CharClass::RangeInclusive(m, n)),
                     actions: vec![],
                 },
@@ -713,11 +712,11 @@ fn lower_nsm_rec(
             //For a star operator looping back is always highest priority. Skipping it is lowest priority
             graph.add_edge_highest_priority(
                 end_node,
-                epsilon_no_actions(EdgeTarget::usize(start_node)),
+                epsilon_no_actions(EdgeTarget::Node(start_node)),
             );
             graph.add_edge_lowest_priority(
                 start_node,
-                epsilon_no_actions(EdgeTarget::usize(end_node)),
+                epsilon_no_actions(EdgeTarget::Node(end_node)),
             );
             Ok(end_node)
         }
@@ -726,7 +725,7 @@ fn lower_nsm_rec(
             //For a plus operator looping back is always highest priority. It can't be skipped.
             graph.add_edge_highest_priority(
                 end_node,
-                epsilon_no_actions(EdgeTarget::usize(start_node)),
+                epsilon_no_actions(EdgeTarget::Node(start_node)),
             );
             Ok(end_node)
         }
@@ -737,7 +736,7 @@ fn lower_nsm_rec(
             for expr in exprs {
                 let end = lower_nsm_rec(graph, start_node, name_table, expr)?;
                 graph
-                    .add_edge_lowest_priority(end, epsilon_no_actions(EdgeTarget::usize(end_node)));
+                    .add_edge_lowest_priority(end, epsilon_no_actions(EdgeTarget::Node(end_node)));
             }
             Ok(end_node)
         }
@@ -746,7 +745,7 @@ fn lower_nsm_rec(
             //An option can be skipped, skipping has lowest priority over consuming input
             graph.add_edge_lowest_priority(
                 start_node,
-                epsilon_no_actions(EdgeTarget::usize(end_node)),
+                epsilon_no_actions(EdgeTarget::Node(end_node)),
             );
             Ok(end_node)
         }
@@ -809,7 +808,7 @@ fn pretty_print_graph<T: Clone + Debug>(graph: &Graph<T>) {
         }
         to_print.push((i, edges));
     }
-    dbg!(to_print, graph.start_node);
+    dbg!(graph.start_node, to_print);
 }
 #[cfg(test)]
 mod tests {
@@ -843,6 +842,17 @@ mod tests {
     #[test]
     fn test_compile_rec() {
         let expr_one = parse_grammarex(&mut r#" "a" | \( start \) "#).unwrap();
+        let start = "start".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr_one);
+        let machine = compile(machines, &start).unwrap();
+        pretty_print_graph(&machine);
+    }
+
+    #[test]
+    fn test_compile_rec_two() {
+        let expr_one = parse_grammarex(&mut r#"   \( "b"  | start\) "#).unwrap();
+        dbg!(&expr_one);
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
