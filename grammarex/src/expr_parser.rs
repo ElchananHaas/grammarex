@@ -407,11 +407,12 @@ mod tests {
     fn test_paren_seq() {
         let result = parse_grammarex(&mut r#" ("a" | "b") "c" "#).unwrap();
         assert_eq!(
-            GrammarEx::Seq(vec![GrammarEx::Alt(vec![
-                GrammarEx::Seq(vec![GrammarEx::Char('a')]),
-                GrammarEx::Seq(vec![GrammarEx::Char('b')])
-            ]),
-            GrammarEx::Seq(vec![GrammarEx::Char('c')])
+            GrammarEx::Seq(vec![
+                GrammarEx::Alt(vec![
+                    GrammarEx::Seq(vec![GrammarEx::Char('a')]),
+                    GrammarEx::Seq(vec![GrammarEx::Char('b')])
+                ]),
+                GrammarEx::Seq(vec![GrammarEx::Char('c')])
             ]),
             result
         );

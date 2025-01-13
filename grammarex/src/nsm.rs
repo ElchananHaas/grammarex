@@ -114,5 +114,4 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
         res.start_node = self.start_node.and_then(|start| node_remap[start]);
         res
     }
-
 }

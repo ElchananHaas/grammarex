@@ -734,8 +734,7 @@ fn lower_nsm_rec(
             let end_node = graph.create_node();
             for expr in exprs {
                 let end = lower_nsm_rec(graph, start_node, name_table, expr)?;
-                graph
-                    .add_edge_lowest_priority(end, epsilon_no_actions(EdgeTarget::Node(end_node)));
+                graph.add_edge_lowest_priority(end, epsilon_no_actions(EdgeTarget::Node(end_node)));
             }
             Ok(end_node)
         }
