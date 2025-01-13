@@ -101,7 +101,6 @@ pub fn compile(
     }
     let elim = eliminate_epsilon(&graph);
     let deduped = full_dedup(&elim);
-    pretty_print_graph(&deduped);
     let pruned = prune_dead_nodes(&deduped, start_node);
     Ok(pruned)
 }
@@ -851,7 +850,29 @@ mod tests {
 
     #[test]
     fn test_compile_rec_two() {
-        let expr_one = parse_grammarex(&mut r#"   \( "b"  | start\) "#).unwrap();
+        let expr_one = parse_grammarex(&mut r#"   \( "b"  | \) start  "#).unwrap();
+        dbg!(&expr_one);
+        let start = "start".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr_one);
+        let machine = compile(machines, &start).unwrap();
+        pretty_print_graph(&machine);
+    }
+
+    #[test]
+    fn test_compile_left_recursion() {
+        let expr_one = parse_grammarex(&mut r#"   \( "b"  | start \) "#).unwrap();
+        dbg!(&expr_one);
+        let start = "start".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr_one);
+        let machine = compile(machines, &start).unwrap();
+        pretty_print_graph(&machine);
+    }
+
+    #[test]
+    fn test_parse() {
+        let expr_one = parse_grammarex(&mut r#"   ("a" | "b")  start "#).unwrap();
         dbg!(&expr_one);
         let start = "start".to_string();
         let mut machines = HashMap::new();

@@ -223,6 +223,7 @@ pub fn parse_grammarex(input: &mut &str) -> Result<GrammarEx, GrammarexParseErro
 fn parse_parentheses(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
     let res = parse_grammarex(input)?;
     if let Some(')') = peek(input) {
+        take_first(input);
         Ok(res)
     } else {
         Err(GrammarexParseError::MismatchedParenthesis)
@@ -385,6 +386,32 @@ mod tests {
             GrammarEx::Alt(vec![
                 GrammarEx::Seq(vec![GrammarEx::Char('a')]),
                 GrammarEx::Seq(vec![GrammarEx::Char('b')])
+            ]),
+            result
+        );
+    }
+
+    #[test]
+    fn test_paren() {
+        let result = parse_grammarex(&mut r#" ("a" | "b") "#).unwrap();
+        assert_eq!(
+            GrammarEx::Alt(vec![
+                GrammarEx::Seq(vec![GrammarEx::Char('a')]),
+                GrammarEx::Seq(vec![GrammarEx::Char('b')])
+            ]),
+            result
+        );
+    }
+
+    #[test]
+    fn test_paren_seq() {
+        let result = parse_grammarex(&mut r#" ("a" | "b") "c" "#).unwrap();
+        assert_eq!(
+            GrammarEx::Seq(vec![GrammarEx::Alt(vec![
+                GrammarEx::Seq(vec![GrammarEx::Char('a')]),
+                GrammarEx::Seq(vec![GrammarEx::Char('b')])
+            ]),
+            GrammarEx::Seq(vec![GrammarEx::Char('c')])
             ]),
             result
         );
