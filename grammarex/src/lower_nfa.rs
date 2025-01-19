@@ -7,7 +7,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    nsm::{Edge, Graph, Remappable},
+    nsm::{Graph, Remappable},
     types::GrammarEx,
 };
 
@@ -24,7 +24,7 @@ enum CharClass {
     Char(char),
     RangeInclusive(char, char),
 }
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 enum EpsCharMatch {
     Epsilon,
     Match(CharClass),
@@ -38,6 +38,7 @@ pub struct NsmConsumeEdge {
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 pub enum NsmEdgeTransition {
     Consume(NsmConsumeEdge),
+    Call(CallData),
     //An edge of the NSM that returns to an unknown place and therefore
     //doesn't consume input.
     Return,
@@ -46,33 +47,32 @@ pub enum NsmEdgeTransition {
 pub struct NsmEdgeData {
     pub transition: NsmEdgeTransition,
     pub actions: Vec<Action>,
-    //A list of nodes to push on the return stack when transitioning this edge.
-    //The VM will use separate stacks for return addresses and for data.
-    pub push_return_stack: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
     Assign(String, String),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CallData {
     name: String,
     target_node: usize,
     return_node: usize,
 }
 
-#[derive(Clone, Debug)]
-pub enum EdgeTarget {
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+pub enum EpsNsmEdgeTransition {
+    Move(EpsCharMatch, usize),
     Call(CallData),
-    Node(usize),
+    //An edge of the NSM that returns to an unknown place and therefore
+    //doesn't consume input.
     Return,
 }
+
 #[derive(Debug, Clone)]
 
 struct EpsNsmEdgeData {
-    target: EdgeTarget,
-    char_match: EpsCharMatch,
+    transition: EpsNsmEdgeTransition,
     actions: Vec<Action>,
 }
 
@@ -101,8 +101,7 @@ pub fn compile(
     }
     let elim = eliminate_epsilon(&graph);
     let deduped = full_dedup(&elim);
-    let pruned = prune_dead_nodes(&deduped, start_node);
-    Ok(pruned)
+    Ok(deduped)
 }
 
 //Removes all unused edges from the graph.
@@ -132,7 +131,7 @@ fn remove_unused_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
 }
 
 fn deduplicate_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
-    let (remap_table, count) = sort_dedup_mapping(graph.edges.iter().map(|x| &x.data));
+    let (remap_table, count) = sort_dedup_mapping(graph.edges.iter().map(|x| &*x));
     let mut new_edges = vec![None; count];
     for i in 0..remap_table.len() {
         new_edges[remap_table[i]] = Some(graph.edges[i].clone());
@@ -176,6 +175,11 @@ impl Remappable for NsmEdgeData {
     {
         let transition = match &self.transition {
             NsmEdgeTransition::Return => NsmEdgeTransition::Return,
+            NsmEdgeTransition::Call(x) => NsmEdgeTransition::Call(CallData {
+                name: x.name.clone(),
+                target_node: remap[x.target_node]?,
+                return_node: remap[x.return_node]?,
+            }),
             NsmEdgeTransition::Consume(NsmConsumeEdge {
                 char_match,
                 target_node,
@@ -184,14 +188,9 @@ impl Remappable for NsmEdgeData {
                 target_node: remap[*target_node]?,
             }),
         };
-        let mut push_return_stack = Vec::new();
-        for item in &self.push_return_stack {
-            push_return_stack.push(remap[*item]?);
-        }
         Some(NsmEdgeData {
             transition,
             actions: self.actions.clone(),
-            push_return_stack,
         })
     }
 }
@@ -275,26 +274,24 @@ fn identify_scc_rec(
 
     let node = graph.get_node(node_index);
     for edge_idx in &node.out_edges {
-        let edge_data = &graph.get_edge(*edge_idx).data;
+        let edge_data = &graph.get_edge(*edge_idx);
         if let NsmEdgeTransition::Consume(target) = &edge_data.transition {
             let target = target.target_node;
-            if edge_data.push_return_stack.len() == 0 {
-                if indexs[target] == 0 {
-                    identify_scc_rec(
-                        graph,
-                        index,
-                        on_stack,
-                        indexs,
-                        lowlinks,
-                        stack,
-                        mapping_table,
-                        scc_count,
-                        target,
-                    );
-                    lowlinks[node_index] = min(lowlinks[node_index], lowlinks[target]);
-                } else if on_stack[target] {
-                    lowlinks[node_index] = min(lowlinks[node_index], lowlinks[target]);
-                }
+            if indexs[target] == 0 {
+                identify_scc_rec(
+                    graph,
+                    index,
+                    on_stack,
+                    indexs,
+                    lowlinks,
+                    stack,
+                    mapping_table,
+                    scc_count,
+                    target,
+                );
+                lowlinks[node_index] = min(lowlinks[node_index], lowlinks[target]);
+            } else if on_stack[target] {
+                lowlinks[node_index] = min(lowlinks[node_index], lowlinks[target]);
             }
         }
     }
@@ -314,7 +311,7 @@ fn identify_scc_rec(
 fn map_for_reachability_summary(in_graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
     let mut res = in_graph.clone();
     for i in 0..in_graph.edges.len() {
-        let data = &mut res.get_edge_mut(i).data;
+        let data = &mut res.get_edge_mut(i);
         data.actions = vec![];
         data.transition = match &data.transition {
             NsmEdgeTransition::Consume(nsm_consume_edge) => {
@@ -324,110 +321,10 @@ fn map_for_reachability_summary(in_graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeD
                 })
             }
             NsmEdgeTransition::Return => NsmEdgeTransition::Return,
+            NsmEdgeTransition::Call(x) => NsmEdgeTransition::Call(x.clone()),
         }
     }
     res
-}
-
-//Returns a summary of which nodes are reachable from which other nodes starting
-//and ending with an empty stack.
-fn reachability_summary(in_graph: &Graph<NsmEdgeData>) -> (Graph<NsmEdgeData>, Vec<usize>) {
-    //This overall mapping holds what nodes are mapped to in the resulting graph.
-    let mut overall_mapping: Vec<usize> = (0..in_graph.nodes.len()).collect();
-    let mut contracted = map_for_reachability_summary(in_graph);
-    contracted = deduplicate_edges(&contracted);
-    loop {
-        let (scc, num_scc) = identify_scc(&contracted);
-        for i in 0..scc.len() {
-            overall_mapping[i] = scc[overall_mapping[i]];
-        }
-        let remap_table = scc.iter().map(|x| Some(*x)).collect();
-        contracted = contracted.remap_nodes(&remap_table, num_scc);
-        contracted = deduplicate_edges(&contracted);
-        let can_reach_return = can_reach_return(&contracted);
-        let mut made_progress = false;
-        for i in 0..contracted.nodes.len() {
-            for &edge in &contracted.get_node(i).out_edges.clone() {
-                let edge_data = &mut contracted.get_edge_mut(edge).data;
-                if let NsmEdgeTransition::Consume(nsm_consume_edge) = &edge_data.transition.clone()
-                {
-                    while let Some(node) = edge_data.push_return_stack.pop() {
-                        if !can_reach_return[node] {
-                            edge_data.push_return_stack.push(node);
-                            break;
-                        }
-                        made_progress = true;
-                        edge_data.transition = NsmEdgeTransition::Consume(NsmConsumeEdge {
-                            char_match: nsm_consume_edge.char_match.clone(),
-                            target_node: node,
-                        });
-                    }
-                }
-            }
-        }
-        if !made_progress {
-            break;
-        }
-    }
-    (contracted, overall_mapping)
-}
-
-fn can_reach_return(contracted: &Graph<NsmEdgeData>) -> Vec<bool> {
-    let mut can_reach_return = vec![false; contracted.nodes.len()];
-    //First, mark the nodes that can reach a return. Since identify_scc returns a topologically sorted
-    //graph, all thats needed is a single pass.
-    for i in 0..contracted.nodes.len() {
-        for &edge in &contracted.get_node(i).out_edges {
-            let edge_data = &contracted.get_edge(edge).data;
-            match &edge_data.transition {
-                NsmEdgeTransition::Consume(nsm_consume_edge) => {
-                    if edge_data.push_return_stack.len() == 0 {
-                        can_reach_return[i] =
-                            can_reach_return[i] || can_reach_return[nsm_consume_edge.target_node];
-                    }
-                }
-                NsmEdgeTransition::Return => {
-                    can_reach_return[i] = true;
-                }
-            }
-        }
-    }
-    can_reach_return
-}
-
-fn identify_live_nodes(in_graph: &Graph<NsmEdgeData>, start: usize) -> Vec<bool> {
-    let (graph, mapping) = reachability_summary(in_graph);
-    let num_nodes = graph.nodes.len();
-    let mut to_process = vec![mapping[start]];
-    //If a node can't be reached from the start it is dead.
-    let mut processed = vec![false; num_nodes];
-    while let Some(node) = to_process.pop() {
-        if processed[node] {
-            continue;
-        }
-        processed[node] = true;
-        for edge in &graph.get_node(node).out_edges {
-            let data = &graph.get_edge(*edge).data;
-            match &data.transition {
-                NsmEdgeTransition::Consume(nsm_consume_edge) => {
-                    to_process.push(nsm_consume_edge.target_node);
-                }
-                //The reachability summary lets us ignore return edges.
-                NsmEdgeTransition::Return => {}
-            }
-        }
-    }
-    //If a node can't reach a return, it is dead.
-    let can_reach_return = can_reach_return(&graph);
-    let mut live = vec![false; num_nodes];
-    for i in 0..num_nodes {
-        live[i] = can_reach_return[i] && processed[i];
-    }
-    let mut in_live = vec![false; in_graph.nodes.len()];
-    for i in 0..in_graph.nodes.len() {
-        in_live[i] = live[mapping[i]];
-    }
-    in_live
 }
 
 pub fn liveness_to_remapping(live: &Vec<bool>) -> (Vec<Option<usize>>, usize) {
@@ -444,214 +341,169 @@ pub fn liveness_to_remapping(live: &Vec<bool>) -> (Vec<Option<usize>>, usize) {
     (res, live_count)
 }
 
-fn prune_dead_nodes(in_graph: &Graph<NsmEdgeData>, start: usize) -> Graph<NsmEdgeData> {
-    let node_liveness = identify_live_nodes(in_graph, start);
-    let (remapping, node_count) = liveness_to_remapping(&node_liveness);
-    let res = in_graph.remap_nodes(&remapping, node_count);
-    let res = remove_unused_edges(&res);
-    res
-}
 struct ElimContext<'a> {
     start: usize,
     graph: &'a Graph<EpsNsmEdgeData>,
 }
 
-#[derive(Clone)]
-struct ReturnRef {
-    node: usize,
-    prior: usize,
-}
-
-struct RewindableStack {
-    // Each node in the list points back to the prior call stack, effectively
-    // forming a linked list.
-    return_stacks: Vec<Option<ReturnRef>>,
-}
-
-impl RewindableStack {
-    fn new() -> Self {
-        RewindableStack {
-            //Start with an empty stack at index 0. This simplifies later code. This must not be popped.
-            return_stacks: vec![None],
-        }
-    }
-
-    fn follow_edge(&mut self, graph: &Graph<EpsNsmEdgeData>, edge_index: usize) -> Option<usize> {
-        let edge = graph.get_edge(edge_index);
-        match &edge.data.target {
-            // In this case, the edge's target is a node index. So
-            // push the actions.
-            EdgeTarget::Node(target) => {
-                let current_return_ref = self.return_stacks.last().cloned().unwrap_or_else(|| None);
-                self.return_stacks.push(current_return_ref);
-                Some(*target)
-            }
-            EdgeTarget::Return => {
-                if let Some(ret) = &self.return_stacks.last().cloned().flatten() {
-                    self.return_stacks
-                        .push(self.return_stacks[ret.prior].clone());
-                    Some(ret.node)
-                } else {
-                    //Push a none here to match the future pop.
-                    self.return_stacks.push(None);
-                    None
-                }
-            }
-            EdgeTarget::Call(call_data) => {
-                let current_last_idx = self.return_stacks.len() - 1;
-                self.return_stacks.push(Some(ReturnRef {
-                    node: call_data.return_node,
-                    prior: current_last_idx,
-                }));
-                Some(call_data.target_node)
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        return self.return_stacks.len() - 1;
-    }
-    //Reverses the latest actions.
-    fn pop(&mut self) {
-        //The stack at index 0 is a guard and must not be popped.
-        assert!(self.return_stacks.len() > 1);
-        self.return_stacks.pop();
-    }
-
-    fn get_return_stack(&self) -> Vec<usize> {
-        let mut res = Vec::new();
-        let mut idx = self.return_stacks.len() - 1;
-        while let Some(ret) = &self.return_stacks[idx] {
-            res.push(ret.node);
-            idx = ret.prior;
-        }
-        res.reverse();
-        res
-    }
-}
-struct PathData<'a> {
-    actions: Vec<&'a Vec<Action>>,
-    stack: RewindableStack,
-}
-
-impl<'a> PathData<'a> {
-    fn new() -> Self {
-        PathData {
-            actions: vec![],
-            stack: RewindableStack::new(),
-        }
-    }
-
-    // Simulates following an edge. If this method returns None, then there was a return action with
-    // no known caller. Returns the destination node.
-    fn follow_edge(
-        &mut self,
-        graph: &'a Graph<EpsNsmEdgeData>,
-        edge_index: usize,
-    ) -> Option<usize> {
-        assert!(self.actions.len() == self.stack.len());
-        let edge = graph.get_edge(edge_index);
-        self.actions.push(&edge.data.actions);
-        self.stack.follow_edge(graph, edge_index)
-    }
-    //Reverses the latest actions.
-    fn pop(&mut self) {
-        self.actions.pop();
-        self.stack.pop();
-    }
-
-    fn get_actions(&self) -> Vec<Action> {
-        let mut res = Vec::new();
-        for segment in &self.actions {
-            for action in *segment {
-                res.push(action.clone());
-            }
-        }
-        res
-    }
-
-    fn get_return_stack(&self) -> Vec<usize> {
-        self.stack.get_return_stack()
-    }
-}
 //Takes in an epsilon graph and the accepting nodes. Returns an equivilent graph that has had epsilon elimination performed.
 fn eliminate_epsilon(graph: &Graph<EpsNsmEdgeData>) -> Graph<NsmEdgeData> {
-    let mut new_graph: Graph<NsmEdgeData> = Graph::new(graph.start_node);
-    for _ in 0..graph.nodes.len() {
-        new_graph.create_node();
-    }
-    for i in 0..graph.nodes.len() {
-        let mut visited_set: HashSet<usize> = HashSet::new();
-        let mut path = PathData::new();
-        let context = ElimContext {
-            start: i,
-            graph: &graph,
-        };
-        replace_with_epsilon_closure(&context, i, &mut new_graph, &mut visited_set, &mut path);
+    let mut already_added_eps: HashSet<(usize, usize)> = HashSet::new();
+    let mut old_size = 0;
+    let mut new_graph: Graph<NsmEdgeData>;
+    loop {
+        new_graph= Graph::new(graph.start_node);
+        for _ in 0..graph.nodes.len() {
+            new_graph.create_node();
+        }
+        for i in 0..graph.nodes.len() {
+            let mut visited_set: HashSet<usize> = HashSet::new();
+            let mut path = Vec::new();
+            let context = ElimContext {
+                start: i,
+                graph: &graph,
+            };
+            replace_epsilon_closure_local(&context, i, &mut new_graph, &mut visited_set, &mut path);
+        }
+        insert_summary_edges(&new_graph, &mut already_added_eps);
+        if old_size == already_added_eps.len() {
+            break;
+        }
+        old_size = already_added_eps.len();
     }
     new_graph
 }
 
+fn insert_summary_edges(
+    graph: &Graph<NsmEdgeData>,
+    already_added_eps: &mut HashSet<(usize, usize)>,
+) {
+    let mut new_graph: Graph<EpsNsmEdgeData> = Graph::new(graph.start_node);
+    for _ in 0..graph.nodes.len() {
+        new_graph.create_node();
+    }
+    for i in 0..graph.nodes.len() {
+        let edges = &graph.get_node(i).out_edges;
+        for j in 0..edges.len() {
+            let edge_index = edges[j];
+            let call_edge = graph.get_edge(edge_index);
+            let eps_transition = match call_edge.transition.clone() {
+                NsmEdgeTransition::Consume(nsm_consume_edge) => EpsNsmEdgeTransition::Move(
+                    EpsCharMatch::Match(nsm_consume_edge.char_match),
+                    nsm_consume_edge.target_node,
+                ),
+                NsmEdgeTransition::Call(call_data) => EpsNsmEdgeTransition::Call(call_data),
+                NsmEdgeTransition::Return => EpsNsmEdgeTransition::Return,
+            };
+            let eps_copy: EpsNsmEdgeData = EpsNsmEdgeData {
+                transition: eps_transition,
+                actions: call_edge.actions.clone(),
+            };
+            new_graph.add_edge_lowest_priority(i, eps_copy);
+            if let NsmEdgeTransition::Call(call_data) = &call_edge.transition {
+                if already_added_eps.contains(&(i, call_data.target_node)) {
+                    continue;
+                }
+                let target = call_data.target_node;
+                for edge in &graph.get_node(target).out_edges {
+                    //The call directly follows a return, so add an epsilon edge here.
+                    let return_edge = graph.get_edge(*edge);
+                    if let NsmEdgeTransition::Return = &return_edge.transition {
+                        already_added_eps.insert((i, call_data.target_node));
+                        let mut new_actions = Vec::new();
+                        new_actions.append(&mut call_edge.actions.clone());
+                        new_actions.append(&mut return_edge.actions.clone());
+                        new_graph.add_edge_lowest_priority(
+                            i,
+                            EpsNsmEdgeData {
+                                transition: EpsNsmEdgeTransition::Move(
+                                    EpsCharMatch::Epsilon,
+                                    call_data.return_node
+                                ),
+                                actions: new_actions,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Replaces a node's edges with their epsilon closure
-fn replace_with_epsilon_closure<'a>(
+fn replace_epsilon_closure_local<'a>(
     context: &ElimContext<'a>,
     current_node: usize,
     new_graph: &mut Graph<NsmEdgeData>,
     visit_set: &mut HashSet<usize>,
-    path: &mut PathData<'a>,
+    path: &mut Vec<usize>,
 ) {
     visit_set.insert(current_node);
     let edges = &context.graph.get_node(current_node).out_edges;
     for &edge_index in edges {
-        let edge: &Edge<EpsNsmEdgeData> = context.graph.get_edge(edge_index);
-        //Follow edge simulates the result of following the edge. This must be paired with a pop statement.
-        if let Some(next_node) = path.follow_edge(&context.graph, edge_index) {
-            //If we are in a transition that consumes input, put an edge into the epsilon eliminated graph consuming that input.
-            if let EpsCharMatch::Match(char_match) = &edge.data.char_match {
-                let new_actions = path.get_actions();
+        let edge: &EpsNsmEdgeData = context.graph.get_edge(edge_index);
+        path.push(edge_index);
+        match &edge.transition {
+            EpsNsmEdgeTransition::Call(call_data) => {
                 new_graph.add_edge_lowest_priority(
                     context.start,
                     NsmEdgeData {
-                        transition: NsmEdgeTransition::Consume(NsmConsumeEdge {
-                            char_match: char_match.clone(),
-                            target_node: next_node,
-                        }),
-                        actions: new_actions,
-                        push_return_stack: path.get_return_stack(),
+                        transition: NsmEdgeTransition::Call(call_data.clone()),
+                        actions: total_actions(context.graph, &path),
                     },
                 );
-            } else {
-                //If the visit set contains the node, there was already a more preferred way to
-                //get to this node and any nodes reachable from it. So do nothing
-                //TODO if the edge is a call edge there may be some more work
-                //needed to handle inductive cycles, since the node can return to itself.
-                if !visit_set.contains(&next_node) {
-                    //In this case, there is an edge that consumes epsilon. So recursively explore more of the graph.
-                    replace_with_epsilon_closure(context, next_node, new_graph, visit_set, path);
+            }
+            EpsNsmEdgeTransition::Move(char_match, next_node) => {
+                if let EpsCharMatch::Match(char_match) = &char_match {
+                    let new_actions = total_actions(context.graph, &path);
+                    new_graph.add_edge_lowest_priority(
+                        context.start,
+                        NsmEdgeData {
+                            transition: NsmEdgeTransition::Consume(NsmConsumeEdge {
+                                char_match: char_match.clone(),
+                                target_node: *next_node,
+                            }),
+                            actions: new_actions,
+                        },
+                    );
+                } else {
+                    //If the visit set contains the node, there was already a more preferred way to
+                    //get to this node and any nodes reachable from it. So do nothing
+                    if !visit_set.contains(&next_node) {
+                        //In this case, there is an edge that consumes epsilon. So recursively explore more of the graph.
+                        replace_epsilon_closure_local(
+                            context, *next_node, new_graph, visit_set, path,
+                        );
+                    }
                 }
             }
-        } else {
-            //In this branch, there was a return but no known caller. The process must stop here due to this.
-            //Instead, Depth First Search at runtime must be used.
-            let new_actions = path.get_actions();
-            //Push return stack is  because if it wasn't, there would be a known node to return to.
-            new_graph.add_edge_lowest_priority(
-                context.start,
-                NsmEdgeData {
-                    transition: NsmEdgeTransition::Return,
-                    actions: new_actions,
-                    push_return_stack: Vec::new(),
-                },
-            );
+            EpsNsmEdgeTransition::Return => {
+                new_graph.add_edge_lowest_priority(
+                    context.start,
+                    NsmEdgeData {
+                        transition: NsmEdgeTransition::Return,
+                        actions: total_actions(context.graph, &path),
+                    },
+                );
+            }
         }
         path.pop();
     }
 }
 
-fn epsilon_no_actions(target: EdgeTarget) -> EpsNsmEdgeData {
+fn total_actions(graph: &Graph<EpsNsmEdgeData>, edges_taken: &Vec<usize>) -> Vec<Action> {
+    let mut res = Vec::new();
+    for edge in edges_taken {
+        for action in &graph.get_edge(*edge).actions {
+            res.push(action.clone());
+        }
+    }
+    res
+}
+
+fn epsilon_no_actions(target: usize) -> EpsNsmEdgeData {
     EpsNsmEdgeData {
-        target,
-        char_match: EpsCharMatch::Epsilon,
+        transition: EpsNsmEdgeTransition::Move(EpsCharMatch::Epsilon, target),
         actions: vec![],
     }
 }
@@ -662,7 +514,13 @@ fn lower_nsm(
     expr: GrammarEx,
 ) -> Result<usize, LoweringError> {
     let end_node = lower_nsm_rec(graph, start_node, name_table, expr)?;
-    graph.add_edge_lowest_priority(end_node, epsilon_no_actions(EdgeTarget::Return));
+    graph.add_edge_lowest_priority(
+        end_node,
+        EpsNsmEdgeData {
+            transition: EpsNsmEdgeTransition::Return,
+            actions: vec![],
+        },
+    );
     Ok(end_node)
 }
 // Takes in an Epsilon graph, a start node, a name table from expression names to start nodes and an expresion to lower.
@@ -680,8 +538,10 @@ fn lower_nsm_rec(
             graph.add_edge_lowest_priority(
                 start_node,
                 EpsNsmEdgeData {
-                    target: EdgeTarget::Node(end_node),
-                    char_match: EpsCharMatch::Match(CharClass::Char(c)),
+                    transition: EpsNsmEdgeTransition::Move(
+                        EpsCharMatch::Match(CharClass::Char(c)),
+                        end_node,
+                    ),
                     actions: vec![],
                 },
             );
@@ -692,8 +552,10 @@ fn lower_nsm_rec(
             graph.add_edge_lowest_priority(
                 start_node,
                 EpsNsmEdgeData {
-                    target: EdgeTarget::Node(end_node),
-                    char_match: EpsCharMatch::Match(CharClass::RangeInclusive(m, n)),
+                    transition: EpsNsmEdgeTransition::Move(
+                        EpsCharMatch::Match(CharClass::RangeInclusive(m, n)),
+                        end_node,
+                    ),
                     actions: vec![],
                 },
             );
@@ -709,23 +571,14 @@ fn lower_nsm_rec(
         GrammarEx::Star(expr) => {
             let end_node = lower_nsm_rec(graph, start_node, name_table, *expr)?;
             //For a star operator looping back is always highest priority. Skipping it is lowest priority
-            graph.add_edge_highest_priority(
-                end_node,
-                epsilon_no_actions(EdgeTarget::Node(start_node)),
-            );
-            graph.add_edge_lowest_priority(
-                start_node,
-                epsilon_no_actions(EdgeTarget::Node(end_node)),
-            );
+            graph.add_edge_highest_priority(end_node, epsilon_no_actions(start_node));
+            graph.add_edge_lowest_priority(start_node, epsilon_no_actions(end_node));
             Ok(end_node)
         }
         GrammarEx::Plus(expr) => {
             let end_node = lower_nsm_rec(graph, start_node, name_table, *expr)?;
             //For a plus operator looping back is always highest priority. It can't be skipped.
-            graph.add_edge_highest_priority(
-                end_node,
-                epsilon_no_actions(EdgeTarget::Node(start_node)),
-            );
+            graph.add_edge_highest_priority(end_node, epsilon_no_actions(start_node));
             Ok(end_node)
         }
         GrammarEx::Alt(exprs) => {
@@ -734,17 +587,14 @@ fn lower_nsm_rec(
             let end_node = graph.create_node();
             for expr in exprs {
                 let end = lower_nsm_rec(graph, start_node, name_table, expr)?;
-                graph.add_edge_lowest_priority(end, epsilon_no_actions(EdgeTarget::Node(end_node)));
+                graph.add_edge_lowest_priority(end, epsilon_no_actions(end_node));
             }
             Ok(end_node)
         }
         GrammarEx::Optional(grammar_ex) => {
             let end_node = lower_nsm_rec(graph, start_node, name_table, *grammar_ex)?;
             //An option can be skipped, skipping has lowest priority over consuming input
-            graph.add_edge_lowest_priority(
-                start_node,
-                epsilon_no_actions(EdgeTarget::Node(end_node)),
-            );
+            graph.add_edge_lowest_priority(start_node, epsilon_no_actions(end_node));
             Ok(end_node)
         }
         GrammarEx::Assign(var, expr) => {
@@ -766,8 +616,7 @@ fn lower_nsm_rec(
             graph.add_edge_lowest_priority(
                 start_node,
                 EpsNsmEdgeData {
-                    target: EdgeTarget::Call(call_data),
-                    char_match: EpsCharMatch::Epsilon,
+                    transition: EpsNsmEdgeTransition::Call(call_data),
                     actions: vec![],
                 },
             );
@@ -786,8 +635,7 @@ fn lower_nsm_rec(
             graph.add_edge_lowest_priority(
                 start_node,
                 EpsNsmEdgeData {
-                    target: EdgeTarget::Call(call_data),
-                    char_match: EpsCharMatch::Epsilon,
+                    transition: EpsNsmEdgeTransition::Call(call_data),
                     actions: vec![],
                 },
             );
@@ -802,7 +650,7 @@ fn pretty_print_graph<T: Clone + Debug>(graph: &Graph<T>) {
         let node = graph.get_node(i);
         let mut edges = vec![];
         for edge in &node.out_edges {
-            edges.push(graph.get_edge(*edge).data.clone());
+            edges.push(graph.get_edge(*edge).clone());
         }
         to_print.push((i, edges));
     }
@@ -849,23 +697,35 @@ mod tests {
 
     #[test]
     fn test_compile_rec_two() {
-        let expr_one = parse_grammarex(&mut r#"   \( "b"  | \) start  "#).unwrap();
-        dbg!(&expr_one);
+        let expr_one = parse_grammarex(&mut r#"   "a" "b"  | "c" start  "#).unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
+        let machine = compile(machines, &start).unwrap();
+        pretty_print_graph(&machine);
+    }
+
+
+    #[test]
+    fn test_compile_call_epsilon() {
+        let expr_one = parse_grammarex(&mut r#" abc = second "#).unwrap();
+        let expr_two = parse_grammarex(&mut r#" "x"? "#).unwrap();
+        let start = "start".to_string();
+        let second = "second".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr_one);
+        machines.insert(second.clone(), expr_two);
         let machine = compile(machines, &start).unwrap();
         pretty_print_graph(&machine);
     }
 
     #[test]
-    fn test_compile_left_recursion() {
-        let expr_one = parse_grammarex(&mut r#"   \( "b"  | start \) "#).unwrap();
+    fn test_compile_left_recursive_loop() {
+        let expr_one = parse_grammarex(&mut r#"   "a" start?  "#).unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
         let machine = compile(machines, &start).unwrap();
         pretty_print_graph(&machine);
     }
-
 }

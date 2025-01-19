@@ -5,10 +5,6 @@ pub struct Node {
     //Out edges are sorted by priority for taking them.
     pub out_edges: VecDeque<usize>,
 }
-#[derive(Clone, Debug)]
-pub struct Edge<EdgeData> {
-    pub data: EdgeData,
-}
 
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
@@ -17,7 +13,7 @@ pub struct Edge<EdgeData> {
 pub struct Graph<EdgeData> {
     pub start_node: Option<usize>,
     pub nodes: Vec<Node>,
-    pub edges: Vec<Edge<EdgeData>>,
+    pub edges: Vec<EdgeData>,
 }
 
 impl<EdgeData> Graph<EdgeData> {
@@ -44,21 +40,21 @@ impl<EdgeData> Graph<EdgeData> {
     pub fn nodes(&self) -> impl Iterator<Item = usize> {
         0..self.nodes.len()
     }
-    pub fn get_edge(&self, idx: usize) -> &Edge<EdgeData> {
+    pub fn get_edge(&self, idx: usize) -> &EdgeData {
         &self.edges[idx]
     }
-    pub fn get_edge_mut(&mut self, idx: usize) -> &mut Edge<EdgeData> {
+    pub fn get_edge_mut(&mut self, idx: usize) -> &mut EdgeData {
         &mut self.edges[idx]
     }
     pub fn add_edge_lowest_priority(&mut self, start: usize, data: EdgeData) {
         let idx = self.edges.len();
-        self.edges.push(Edge { data });
+        self.edges.push(data);
         self.nodes[start].out_edges.push_back(idx);
     }
 
     pub fn add_edge_highest_priority(&mut self, start: usize, data: EdgeData) {
         let idx = self.edges.len();
-        self.edges.push(Edge { data });
+        self.edges.push(data);
         self.nodes[start].out_edges.push_front(idx);
     }
 
@@ -91,9 +87,9 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
         let mut remapped_edges = Vec::new();
         let mut edge_remap_table = Vec::new();
         for edge in &self.edges {
-            if let Some(mapped_data) = edge.data.remap(node_remap) {
+            if let Some(mapped_data) = edge.remap(node_remap) {
                 edge_remap_table.push(Some(remapped_edges.len()));
-                remapped_edges.push(Edge { data: mapped_data });
+                remapped_edges.push(mapped_data);
             } else {
                 edge_remap_table.push(None);
             }
