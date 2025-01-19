@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Node {
@@ -58,15 +58,27 @@ impl<EdgeData> Graph<EdgeData> {
         self.nodes[start].out_edges.push_front(idx);
     }
 
-    pub fn sort_dedup_out_edges(&mut self) {
+    pub fn dedup_out_edges(&mut self) {
         for i in 0..self.nodes.len() {
-            let mut out_edges: Vec<usize> = self.get_node_mut(i).out_edges.clone().into();
-            out_edges.sort();
-            out_edges.dedup();
-            self.get_node_mut(i).out_edges = out_edges.into();
+            self.node_dedup_out_edges(i);
         }
     }
+
+    fn node_dedup_out_edges(&mut self, idx: usize) {
+        let out_edges = &mut self.get_node_mut(idx).out_edges;
+        let mut seen = HashSet::new();
+        let mut ctr = 0;
+        for i in 0..out_edges.len() {
+            if !seen.contains(&out_edges[i]) {
+                seen.insert(out_edges[i]);
+                out_edges[ctr] = out_edges[i];
+                ctr += 1;
+            }
+        }
+        out_edges.truncate(ctr);
+    }
 }
+
 
 pub trait Remappable {
     //Remaps the referenced nodes in an edge according to the remap table.
@@ -105,7 +117,7 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
                 }
             }
         }
-        res.sort_dedup_out_edges();
+        res.dedup_out_edges();
         res.edges = remapped_edges;
         res.start_node = self.start_node.and_then(|start| node_remap[start]);
         res

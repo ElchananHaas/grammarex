@@ -1,6 +1,6 @@
 use std::{
     cmp::min,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
 };
 
@@ -143,11 +143,10 @@ fn deduplicate_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
     let mut res: Graph<NsmEdgeData> = Graph::new(graph.start_node);
     for node in &graph.nodes {
         let node_idx = res.create_node();
-        let mut new_out_edges: Vec<_> = node.out_edges.iter().map(|x| remap_table[*x]).collect();
-        new_out_edges.sort();
-        new_out_edges.dedup();
-        res.get_node_mut(node_idx).out_edges = new_out_edges.into();
+        let new_out_edges: VecDeque<_> = node.out_edges.iter().map(|x| remap_table[*x]).collect();
+        res.get_node_mut(node_idx).out_edges = new_out_edges;
     }
+    res.dedup_out_edges();
     res.edges = new_edges;
     res
 }
@@ -721,7 +720,7 @@ mod tests {
 
     #[test]
     fn test_compile_left_recursive_loop() {
-        let expr_one = parse_grammarex(&mut r#"   "a" start?  "#).unwrap();
+        let expr_one = parse_grammarex(&mut r#"  start? "a"   "#).unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
