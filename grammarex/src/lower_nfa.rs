@@ -20,12 +20,12 @@ pub enum LoweringError {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
-enum CharClass {
+pub enum CharClass {
     Char(char),
     RangeInclusive(char, char),
 }
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
-enum EpsCharMatch {
+pub enum EpsCharMatch {
     Epsilon,
     Match(CharClass),
 }
@@ -99,7 +99,8 @@ pub fn compile(
         )?;
         end_nodes.insert(machine.0.clone(), end_node);
     }
-    let elim = eliminate_epsilon(&graph);
+    let start_nodes: Vec<usize> = machine_starts.values().copied().collect();
+    let elim = eliminate_epsilon(&graph, &start_nodes);
     let deduped = full_dedup(&elim);
     Ok(deduped)
 }
@@ -343,118 +344,154 @@ pub fn liveness_to_remapping(live: &Vec<bool>) -> (Vec<Option<usize>>, usize) {
 struct ElimContext<'a> {
     start: usize,
     graph: &'a Graph<EpsNsmEdgeData>,
+    bypasses: &'a HashMap<usize, Vec<Action>>,
 }
 
 //Takes in an epsilon graph and the accepting nodes. Returns an equivilent graph that has had epsilon elimination performed.
-fn eliminate_epsilon(graph: &Graph<EpsNsmEdgeData>) -> Graph<NsmEdgeData> {
-    let mut already_added_eps: HashSet<(usize, usize)> = HashSet::new();
-    let mut old_size = 0;
+fn eliminate_epsilon(
+    graph: &Graph<EpsNsmEdgeData>,
+    start_nodes: &Vec<usize>,
+) -> Graph<NsmEdgeData> {
     let mut new_graph: Graph<NsmEdgeData>;
-    loop {
-        new_graph= Graph::new(graph.start_node);
-        for _ in 0..graph.nodes.len() {
-            new_graph.create_node();
-        }
-        for i in 0..graph.nodes.len() {
-            let mut visited_set: HashSet<usize> = HashSet::new();
-            let mut path = Vec::new();
-            let context = ElimContext {
-                start: i,
-                graph: &graph,
-            };
-            replace_epsilon_closure_local(&context, i, &mut new_graph, &mut visited_set, &mut path);
-        }
-        insert_summary_edges(&new_graph, &mut already_added_eps);
-        if old_size == already_added_eps.len() {
-            break;
-        }
-        old_size = already_added_eps.len();
-    }
-    new_graph
-}
-
-fn insert_summary_edges(
-    graph: &Graph<NsmEdgeData>,
-    already_added_eps: &mut HashSet<(usize, usize)>,
-) {
-    let mut new_graph: Graph<EpsNsmEdgeData> = Graph::new(graph.start_node);
+    new_graph = Graph::new(graph.start_node);
     for _ in 0..graph.nodes.len() {
         new_graph.create_node();
     }
+    let bypasses = build_epsilon_return_bypasses(graph, start_nodes);
     for i in 0..graph.nodes.len() {
-        let edges = &graph.get_node(i).out_edges;
-        for j in 0..edges.len() {
-            let edge_index = edges[j];
-            let call_edge = graph.get_edge(edge_index);
-            let eps_transition = match call_edge.transition.clone() {
-                NsmEdgeTransition::Consume(nsm_consume_edge) => EpsNsmEdgeTransition::Move(
-                    EpsCharMatch::Match(nsm_consume_edge.char_match),
-                    nsm_consume_edge.target_node,
-                ),
-                NsmEdgeTransition::Call(call_data) => EpsNsmEdgeTransition::Call(call_data),
-                NsmEdgeTransition::Return => EpsNsmEdgeTransition::Return,
-            };
-            let eps_copy: EpsNsmEdgeData = EpsNsmEdgeData {
-                transition: eps_transition,
-                actions: call_edge.actions.clone(),
-            };
-            new_graph.add_edge_lowest_priority(i, eps_copy);
-            if let NsmEdgeTransition::Call(call_data) = &call_edge.transition {
-                if already_added_eps.contains(&(i, call_data.target_node)) {
-                    continue;
-                }
-                let target = call_data.target_node;
-                for edge in &graph.get_node(target).out_edges {
-                    //The call directly follows a return, so add an epsilon edge here.
-                    let return_edge = graph.get_edge(*edge);
-                    if let NsmEdgeTransition::Return = &return_edge.transition {
-                        already_added_eps.insert((i, call_data.target_node));
-                        let mut new_actions = Vec::new();
-                        new_actions.append(&mut call_edge.actions.clone());
-                        new_actions.append(&mut return_edge.actions.clone());
-                        new_graph.add_edge_lowest_priority(
-                            i,
-                            EpsNsmEdgeData {
-                                transition: EpsNsmEdgeTransition::Move(
-                                    EpsCharMatch::Epsilon,
-                                    call_data.return_node
-                                ),
-                                actions: new_actions,
-                            },
-                        );
-                    }
-                }
+        let mut visited_set: HashSet<usize> = HashSet::new();
+        let mut actions = Vec::new();
+        let context = ElimContext {
+            start: i,
+            graph: &graph,
+            bypasses: &bypasses,
+        };
+        replace_with_epsilon_closure(&context, i, &mut new_graph, &mut visited_set, &mut actions);
+    }
+
+    new_graph
+}
+
+//This returns a map from the start of machines that accept epsilon to
+//sequences of actions for an epsilon transition to bypass those machines.
+//If a machine isn't present, it doesn't accept epsilon.
+fn build_epsilon_return_bypasses(
+    graph: &Graph<EpsNsmEdgeData>,
+    start_nodes: &Vec<usize>,
+) -> HashMap<usize, Vec<Action>> {
+    let mut graph = graph.clone();
+    let mut res: HashMap<usize, Vec<Action>> = HashMap::new();
+    loop {
+        for node in start_nodes {
+            let mut visit_set = HashSet::new();
+            let mut path = Vec::new();
+            if let Some((node, actions)) =
+                search_for_epsilon_return(&graph, *node, &mut visit_set, &mut path)
+            {
+                res.insert(node, actions);
+            }
+        }
+        if !replace_calls_with_bypasses(&mut graph, &res) {
+            break;
+        }
+    }
+    res
+}
+
+fn replace_calls_with_bypasses(
+    graph: &mut Graph<EpsNsmEdgeData>,
+    replace_map: &HashMap<usize, Vec<Action>>,
+) -> bool {
+    let mut made_progress = false;
+    for edge in &mut graph.edges {
+        if let EpsNsmEdgeTransition::Call(call_data) = &edge.transition {
+            if let Some(actions) = replace_map.get(&call_data.target_node) {
+                edge.actions = actions.clone();
+                edge.transition =
+                    EpsNsmEdgeTransition::Move(EpsCharMatch::Epsilon, call_data.return_node);
+                made_progress = true;
             }
         }
     }
+    made_progress
 }
-
+fn search_for_epsilon_return(
+    graph: &Graph<EpsNsmEdgeData>,
+    node: usize,
+    visit_set: &mut HashSet<usize>,
+    path: &mut Vec<usize>,
+) -> Option<(usize, Vec<Action>)> {
+    if visit_set.contains(&node) {
+        return None;
+    }
+    visit_set.insert(node);
+    let edges = &graph.get_node(node).out_edges;
+    for &edge_index in edges {
+        path.push(edge_index);
+        let edge: &EpsNsmEdgeData = graph.get_edge(edge_index);
+        match &edge.transition {
+            EpsNsmEdgeTransition::Move(EpsCharMatch::Epsilon, next_node) => {
+                if let Some(res) = search_for_epsilon_return(graph, *next_node, visit_set, path) {
+                    return Some(res);
+                }
+            }
+            EpsNsmEdgeTransition::Return => {
+                return Some((node, total_actions(graph, &path)));
+            }
+            _ => {}
+        }
+        path.pop();
+    }
+    None
+}
 // Replaces a node's edges with their epsilon closure
-fn replace_epsilon_closure_local<'a>(
+fn replace_with_epsilon_closure<'a>(
     context: &ElimContext<'a>,
     current_node: usize,
     new_graph: &mut Graph<NsmEdgeData>,
     visit_set: &mut HashSet<usize>,
-    path: &mut Vec<usize>,
+    actions: &mut Vec<Action>,
 ) {
     visit_set.insert(current_node);
     let edges = &context.graph.get_node(current_node).out_edges;
     for &edge_index in edges {
         let edge: &EpsNsmEdgeData = context.graph.get_edge(edge_index);
-        path.push(edge_index);
+        for action in &context.graph.get_edge(edge_index).actions {
+            actions.push(action.clone());
+        }
         match &edge.transition {
             EpsNsmEdgeTransition::Call(call_data) => {
                 new_graph.add_edge_lowest_priority(
                     context.start,
                     NsmEdgeData {
                         transition: NsmEdgeTransition::Call(call_data.clone()),
-                        actions: total_actions(context.graph, &path),
+                        actions: actions.clone(),
                     },
                 );
+                //If the state being called accepts epsilon, bypass it in epsilon elimination
+                //If we already processed the node, no need to explore it.
+                if !visit_set.contains(&call_data.return_node) {
+                    if let Some(bypass_actions) = context.bypasses.get(&call_data.target_node) {
+                        //Add in any actions used in the bypass.
+                        for action in bypass_actions {
+                            actions.push(action.clone());
+                        }
+                        replace_with_epsilon_closure(
+                            context,
+                            call_data.target_node,
+                            new_graph,
+                            visit_set,
+                            actions,
+                        );
+                        for _ in bypass_actions {
+                            actions.pop();
+                        }
+                    }
+                }
             }
             EpsNsmEdgeTransition::Move(char_match, next_node) => {
                 if let EpsCharMatch::Match(char_match) = &char_match {
-                    let new_actions = total_actions(context.graph, &path);
+                    let new_actions = actions.clone();
                     new_graph.add_edge_lowest_priority(
                         context.start,
                         NsmEdgeData {
@@ -470,8 +507,8 @@ fn replace_epsilon_closure_local<'a>(
                     //get to this node and any nodes reachable from it. So do nothing
                     if !visit_set.contains(&next_node) {
                         //In this case, there is an edge that consumes epsilon. So recursively explore more of the graph.
-                        replace_epsilon_closure_local(
-                            context, *next_node, new_graph, visit_set, path,
+                        replace_with_epsilon_closure(
+                            context, *next_node, new_graph, visit_set, actions,
                         );
                     }
                 }
@@ -481,12 +518,14 @@ fn replace_epsilon_closure_local<'a>(
                     context.start,
                     NsmEdgeData {
                         transition: NsmEdgeTransition::Return,
-                        actions: total_actions(context.graph, &path),
+                        actions: actions.clone(),
                     },
                 );
             }
         }
-        path.pop();
+        for _ in &context.graph.get_edge(edge_index).actions {
+            actions.pop();
+        }
     }
 }
 
@@ -703,7 +742,6 @@ mod tests {
         let machine = compile(machines, &start).unwrap();
         pretty_print_graph(&machine);
     }
-
 
     #[test]
     fn test_compile_call_epsilon() {

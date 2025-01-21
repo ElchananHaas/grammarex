@@ -79,7 +79,6 @@ impl<EdgeData> Graph<EdgeData> {
     }
 }
 
-
 pub trait Remappable {
     //Remaps the referenced nodes in an edge according to the remap table.
     //If this can't be done, return None.
