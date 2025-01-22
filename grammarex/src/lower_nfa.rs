@@ -379,16 +379,16 @@ fn build_epsilon_return_bypasses(
     graph: &Graph<EpsNsmEdgeData>,
     start_nodes: &Vec<usize>,
 ) -> HashMap<usize, Vec<Action>> {
-    let mut graph = graph.clone();
+    let mut graph: Graph<EpsNsmEdgeData> = graph.clone();
     let mut res: HashMap<usize, Vec<Action>> = HashMap::new();
     loop {
         for node in start_nodes {
             let mut visit_set = HashSet::new();
             let mut path = Vec::new();
-            if let Some((node, actions)) =
+            if let Some(actions) =
                 search_for_epsilon_return(&graph, *node, &mut visit_set, &mut path)
             {
-                res.insert(node, actions);
+                res.insert(*node, actions);
             }
         }
         if !replace_calls_with_bypasses(&mut graph, &res) {
@@ -420,7 +420,7 @@ fn search_for_epsilon_return(
     node: usize,
     visit_set: &mut HashSet<usize>,
     path: &mut Vec<usize>,
-) -> Option<(usize, Vec<Action>)> {
+) -> Option<Vec<Action>> {
     if visit_set.contains(&node) {
         return None;
     }
@@ -436,7 +436,7 @@ fn search_for_epsilon_return(
                 }
             }
             EpsNsmEdgeTransition::Return => {
-                return Some((node, total_actions(graph, &path)));
+                return Some(total_actions(graph, &path));
             }
             _ => {}
         }
@@ -478,7 +478,7 @@ fn replace_with_epsilon_closure<'a>(
                         }
                         replace_with_epsilon_closure(
                             context,
-                            call_data.target_node,
+                            call_data.return_node,
                             new_graph,
                             visit_set,
                             actions,
