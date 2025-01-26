@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Node {
@@ -6,22 +6,27 @@ pub struct Node {
     pub out_edges: VecDeque<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MachineInfo {
+    pub node: usize,
+    pub accepts_epsilon: bool
+}
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
 // For each node, an edge is in its out_edges iff it starts at the node.
 #[derive(Debug, Clone)]
 pub struct Graph<EdgeData> {
-    pub start_node: Option<usize>,
+    pub named_nodes: HashMap<String, MachineInfo>,
     pub nodes: Vec<Node>,
     pub edges: Vec<EdgeData>,
 }
 
 impl<EdgeData> Graph<EdgeData> {
-    pub fn new(start_node: Option<usize>) -> Self {
+    pub fn new(named_nodes: HashMap<String, MachineInfo>) -> Self {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
-            start_node,
+            named_nodes,
         }
     }
 
@@ -91,7 +96,7 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
     //Remaps graph nodes. All nodes that map to the same node_remap are merged.
     pub fn remap_nodes(&self, node_remap: &Vec<Option<usize>>, nodes_after_remap: usize) -> Self {
         assert_eq!(node_remap.len(), self.nodes.len());
-        let mut res = Self::new(None);
+        let mut res = Self::new(HashMap::new());
         for _ in 0..nodes_after_remap {
             res.create_node();
         }
@@ -118,7 +123,16 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
         }
         res.dedup_out_edges();
         res.edges = remapped_edges;
-        res.start_node = self.start_node.and_then(|start| node_remap[start]);
+        res.named_nodes = self
+            .named_nodes
+            .iter()
+            .filter_map(|(name, info)| Some((name.clone(), 
+            MachineInfo {
+                node: node_remap[info.node]?,
+                accepts_epsilon: info.accepts_epsilon,
+            }
+            )))
+            .collect();
         res
     }
 }

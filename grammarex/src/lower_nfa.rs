@@ -7,7 +7,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    nsm::{Graph, Remappable},
+    nsm::{Graph, MachineInfo, Remappable},
     types::GrammarEx,
 };
 
@@ -78,36 +78,28 @@ struct EpsNsmEdgeData {
 
 pub fn compile(
     machines: HashMap<String, GrammarEx>,
-    start_machine: &String,
 ) -> Result<Graph<NsmEdgeData>, LoweringError> {
-    let mut graph: Graph<EpsNsmEdgeData> = Graph::new(None);
-    let machine_starts: HashMap<String, _> = machines
-        .iter()
-        .map(|(name, _)| ((name.clone()), graph.create_node()))
-        .collect();
-    let start_node = *machine_starts
-        .get(start_machine)
-        .ok_or_else(|| LoweringError::UnknownExpression(start_machine.clone()))?;
-    graph.start_node = Some(start_node);
-    let mut end_nodes = HashMap::new();
-    for machine in machines {
-        let end_node = lower_nsm(
-            &mut graph,
-            *machine_starts.get(&machine.0).expect("It exists"),
-            &machine_starts,
-            machine.1,
-        )?;
-        end_nodes.insert(machine.0.clone(), end_node);
+    let mut graph: Graph<EpsNsmEdgeData> = Graph::new(HashMap::new());
+    for (machine_name, _) in &machines {
+        let node =  graph.create_node();
+        graph.named_nodes.insert(machine_name.clone(), MachineInfo {
+            node,
+            accepts_epsilon: false,
+        });
     }
-    let start_nodes: Vec<usize> = machine_starts.values().copied().collect();
-    let elim = eliminate_epsilon(&graph, &start_nodes);
+    //We need to create nodes for every expression before lowering them.
+    for (machine_name, machine_expr) in machines {
+        let info = *graph.named_nodes.get(&machine_name).expect("It exists");
+        lower_nsm(&mut graph, info.node, machine_expr)?;
+    }
+    let elim = eliminate_epsilon(&graph);
     let deduped = full_dedup(&elim);
     Ok(deduped)
 }
 
 //Removes all unused edges from the graph.
 fn remove_unused_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
-    let mut res: Graph<NsmEdgeData> = Graph::new(graph.start_node);
+    let mut res: Graph<NsmEdgeData> = Graph::new(graph.named_nodes.clone());
     let mut live_edges = vec![false; graph.edges.len()];
     for i in 0..graph.nodes.len() {
         for &edge_idx in &graph.get_node(i).out_edges {
@@ -141,7 +133,7 @@ fn deduplicate_edges(graph: &Graph<NsmEdgeData>) -> Graph<NsmEdgeData> {
         .into_iter()
         .map(|x| x.expect("Edge was mapped"))
         .collect();
-    let mut res: Graph<NsmEdgeData> = Graph::new(graph.start_node);
+    let mut res: Graph<NsmEdgeData> = Graph::new(graph.named_nodes.clone());
     for node in &graph.nodes {
         let node_idx = res.create_node();
         let new_out_edges: VecDeque<_> = node.out_edges.iter().map(|x| remap_table[*x]).collect();
@@ -350,14 +342,13 @@ struct ElimContext<'a> {
 //Takes in an epsilon graph and the accepting nodes. Returns an equivilent graph that has had epsilon elimination performed.
 fn eliminate_epsilon(
     graph: &Graph<EpsNsmEdgeData>,
-    start_nodes: &Vec<usize>,
 ) -> Graph<NsmEdgeData> {
     let mut new_graph: Graph<NsmEdgeData>;
-    new_graph = Graph::new(graph.start_node);
+    new_graph = Graph::new(graph.named_nodes.clone());
     for _ in 0..graph.nodes.len() {
         new_graph.create_node();
     }
-    let bypasses = build_epsilon_return_bypasses(graph, start_nodes);
+    let bypasses = build_epsilon_return_bypasses(graph, &mut new_graph);
     for i in 0..graph.nodes.len() {
         let mut visited_set: HashSet<usize> = HashSet::new();
         let mut actions = Vec::new();
@@ -368,7 +359,6 @@ fn eliminate_epsilon(
         };
         replace_with_epsilon_closure(&context, i, &mut new_graph, &mut visited_set, &mut actions);
     }
-
     new_graph
 }
 
@@ -377,18 +367,19 @@ fn eliminate_epsilon(
 //If a machine isn't present, it doesn't accept epsilon.
 fn build_epsilon_return_bypasses(
     graph: &Graph<EpsNsmEdgeData>,
-    start_nodes: &Vec<usize>,
+    new_graph: &mut Graph<NsmEdgeData>,
 ) -> HashMap<usize, Vec<Action>> {
     let mut graph: Graph<EpsNsmEdgeData> = graph.clone();
     let mut res: HashMap<usize, Vec<Action>> = HashMap::new();
     loop {
-        for node in start_nodes {
+        for (name, info) in &graph.named_nodes {
             let mut visit_set = HashSet::new();
             let mut path = Vec::new();
             if let Some(actions) =
-                search_for_epsilon_return(&graph, *node, &mut visit_set, &mut path)
+                search_for_epsilon_return(&graph, info.node, &mut visit_set, &mut path)
             {
-                res.insert(*node, actions);
+                res.insert(info.node, actions);
+                new_graph.named_nodes.get_mut(name).expect("It exists").accepts_epsilon = true;
             }
         }
         if !replace_calls_with_bypasses(&mut graph, &res) {
@@ -548,10 +539,9 @@ fn epsilon_no_actions(target: usize) -> EpsNsmEdgeData {
 fn lower_nsm(
     graph: &mut Graph<EpsNsmEdgeData>,
     start_node: usize,
-    name_table: &HashMap<String, usize>,
     expr: GrammarEx,
 ) -> Result<usize, LoweringError> {
-    let end_node = lower_nsm_rec(graph, start_node, name_table, expr)?;
+    let end_node = lower_nsm_rec(graph, start_node, expr)?;
     graph.add_edge_lowest_priority(
         end_node,
         EpsNsmEdgeData {
@@ -566,7 +556,6 @@ fn lower_nsm(
 fn lower_nsm_rec(
     graph: &mut Graph<EpsNsmEdgeData>,
     start_node: usize,
-    name_table: &HashMap<String, usize>,
     expr: GrammarEx,
 ) -> Result<usize, LoweringError> {
     match expr {
@@ -602,19 +591,19 @@ fn lower_nsm_rec(
         GrammarEx::Seq(exprs) => {
             let mut end_node = start_node;
             for expr in exprs {
-                end_node = lower_nsm_rec(graph, end_node, name_table, expr)?;
+                end_node = lower_nsm_rec(graph, end_node, expr)?;
             }
             Ok(end_node)
         }
         GrammarEx::Star(expr) => {
-            let end_node = lower_nsm_rec(graph, start_node, name_table, *expr)?;
+            let end_node = lower_nsm_rec(graph, start_node, *expr)?;
             //For a star operator looping back is always highest priority. Skipping it is lowest priority
             graph.add_edge_highest_priority(end_node, epsilon_no_actions(start_node));
             graph.add_edge_lowest_priority(start_node, epsilon_no_actions(end_node));
             Ok(end_node)
         }
         GrammarEx::Plus(expr) => {
-            let end_node = lower_nsm_rec(graph, start_node, name_table, *expr)?;
+            let end_node = lower_nsm_rec(graph, start_node, *expr)?;
             //For a plus operator looping back is always highest priority. It can't be skipped.
             graph.add_edge_highest_priority(end_node, epsilon_no_actions(start_node));
             Ok(end_node)
@@ -624,13 +613,13 @@ fn lower_nsm_rec(
             //alt is non-empty, but that would make it more complicated.
             let end_node = graph.create_node();
             for expr in exprs {
-                let end = lower_nsm_rec(graph, start_node, name_table, expr)?;
+                let end = lower_nsm_rec(graph, start_node, expr)?;
                 graph.add_edge_lowest_priority(end, epsilon_no_actions(end_node));
             }
             Ok(end_node)
         }
         GrammarEx::Optional(grammar_ex) => {
-            let end_node = lower_nsm_rec(graph, start_node, name_table, *grammar_ex)?;
+            let end_node = lower_nsm_rec(graph, start_node,  *grammar_ex)?;
             //An option can be skipped, skipping has lowest priority over consuming input
             graph.add_edge_lowest_priority(start_node, epsilon_no_actions(end_node));
             Ok(end_node)
@@ -642,12 +631,12 @@ fn lower_nsm_rec(
             let GrammarEx::Var(expr) = *expr else {
                 return Err(LoweringError::InvalidVariableAssignment);
             };
-            let expr_node = *name_table
+            let info = *graph.named_nodes
                 .get(&expr)
                 .ok_or_else(|| LoweringError::UnknownExpression(expr.clone()))?;
             let return_node = graph.create_node();
             let call_data = CallData {
-                target_node: expr_node,
+                target_node: info.node,
                 name: expr,
                 return_node,
             };
@@ -661,12 +650,12 @@ fn lower_nsm_rec(
             Ok(return_node)
         }
         GrammarEx::Var(expr) => {
-            let expr_node = *name_table
+            let info = *graph.named_nodes
                 .get(&expr)
                 .ok_or_else(|| LoweringError::UnknownExpression(expr.clone()))?;
             let return_node = graph.create_node();
             let call_data = CallData {
-                target_node: expr_node,
+                target_node: info.node,
                 name: expr,
                 return_node,
             };
@@ -692,7 +681,7 @@ fn pretty_print_graph<T: Clone + Debug>(graph: &Graph<T>) {
         }
         to_print.push((i, edges));
     }
-    dbg!(graph.start_node, to_print);
+    dbg!(&graph.named_nodes, to_print);
 }
 #[cfg(test)]
 mod tests {
@@ -706,7 +695,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr);
-        let machine = compile(machines, &start).unwrap();
+        let machine = compile(machines).unwrap();
         pretty_print_graph(&machine);
     }
 
@@ -719,7 +708,7 @@ mod tests {
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
         machines.insert(second.clone(), expr_two);
-        let machine = compile(machines, &start).unwrap();
+        let machine = compile(machines).unwrap();
         pretty_print_graph(&machine);
     }
 
@@ -729,7 +718,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
-        let machine = compile(machines, &start).unwrap();
+        let machine = compile(machines).unwrap();
         pretty_print_graph(&machine);
     }
 
@@ -739,7 +728,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
-        let machine = compile(machines, &start).unwrap();
+        let machine = compile(machines).unwrap();
         pretty_print_graph(&machine);
     }
 
@@ -752,7 +741,7 @@ mod tests {
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
         machines.insert(second.clone(), expr_two);
-        let machine = compile(machines, &start).unwrap();
+        let machine = compile(machines).unwrap();
         pretty_print_graph(&machine);
     }
 
@@ -762,7 +751,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
-        let machine = compile(machines, &start).unwrap();
+        let machine = compile(machines).unwrap();
         pretty_print_graph(&machine);
     }
 }
