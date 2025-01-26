@@ -9,7 +9,7 @@ pub struct Node {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MachineInfo {
     pub node: usize,
-    pub accepts_epsilon: bool
+    pub accepts_epsilon: bool,
 }
 // Invariants:
 // For each edge, it is in the node it starts at's out_edges and no other out_edges
@@ -126,12 +126,15 @@ impl<EdgeData: Remappable> Graph<EdgeData> {
         res.named_nodes = self
             .named_nodes
             .iter()
-            .filter_map(|(name, info)| Some((name.clone(), 
-            MachineInfo {
-                node: node_remap[info.node]?,
-                accepts_epsilon: info.accepts_epsilon,
-            }
-            )))
+            .filter_map(|(name, info)| {
+                Some((
+                    name.clone(),
+                    MachineInfo {
+                        node: node_remap[info.node]?,
+                        accepts_epsilon: info.accepts_epsilon,
+                    },
+                ))
+            })
             .collect();
         res
     }

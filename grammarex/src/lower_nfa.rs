@@ -76,16 +76,17 @@ struct EpsNsmEdgeData {
     actions: Vec<Action>,
 }
 
-pub fn compile(
-    machines: HashMap<String, GrammarEx>,
-) -> Result<Graph<NsmEdgeData>, LoweringError> {
+pub fn compile(machines: HashMap<String, GrammarEx>) -> Result<Graph<NsmEdgeData>, LoweringError> {
     let mut graph: Graph<EpsNsmEdgeData> = Graph::new(HashMap::new());
     for (machine_name, _) in &machines {
-        let node =  graph.create_node();
-        graph.named_nodes.insert(machine_name.clone(), MachineInfo {
-            node,
-            accepts_epsilon: false,
-        });
+        let node = graph.create_node();
+        graph.named_nodes.insert(
+            machine_name.clone(),
+            MachineInfo {
+                node,
+                accepts_epsilon: false,
+            },
+        );
     }
     //We need to create nodes for every expression before lowering them.
     for (machine_name, machine_expr) in machines {
@@ -340,9 +341,7 @@ struct ElimContext<'a> {
 }
 
 //Takes in an epsilon graph and the accepting nodes. Returns an equivilent graph that has had epsilon elimination performed.
-fn eliminate_epsilon(
-    graph: &Graph<EpsNsmEdgeData>,
-) -> Graph<NsmEdgeData> {
+fn eliminate_epsilon(graph: &Graph<EpsNsmEdgeData>) -> Graph<NsmEdgeData> {
     let mut new_graph: Graph<NsmEdgeData>;
     new_graph = Graph::new(graph.named_nodes.clone());
     for _ in 0..graph.nodes.len() {
@@ -379,7 +378,11 @@ fn build_epsilon_return_bypasses(
                 search_for_epsilon_return(&graph, info.node, &mut visit_set, &mut path)
             {
                 res.insert(info.node, actions);
-                new_graph.named_nodes.get_mut(name).expect("It exists").accepts_epsilon = true;
+                new_graph
+                    .named_nodes
+                    .get_mut(name)
+                    .expect("It exists")
+                    .accepts_epsilon = true;
             }
         }
         if !replace_calls_with_bypasses(&mut graph, &res) {
@@ -619,7 +622,7 @@ fn lower_nsm_rec(
             Ok(end_node)
         }
         GrammarEx::Optional(grammar_ex) => {
-            let end_node = lower_nsm_rec(graph, start_node,  *grammar_ex)?;
+            let end_node = lower_nsm_rec(graph, start_node, *grammar_ex)?;
             //An option can be skipped, skipping has lowest priority over consuming input
             graph.add_edge_lowest_priority(start_node, epsilon_no_actions(end_node));
             Ok(end_node)
@@ -631,7 +634,8 @@ fn lower_nsm_rec(
             let GrammarEx::Var(expr) = *expr else {
                 return Err(LoweringError::InvalidVariableAssignment);
             };
-            let info = *graph.named_nodes
+            let info = *graph
+                .named_nodes
                 .get(&expr)
                 .ok_or_else(|| LoweringError::UnknownExpression(expr.clone()))?;
             let return_node = graph.create_node();
@@ -650,7 +654,8 @@ fn lower_nsm_rec(
             Ok(return_node)
         }
         GrammarEx::Var(expr) => {
-            let info = *graph.named_nodes
+            let info = *graph
+                .named_nodes
                 .get(&expr)
                 .ok_or_else(|| LoweringError::UnknownExpression(expr.clone()))?;
             let return_node = graph.create_node();

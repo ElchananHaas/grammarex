@@ -1,6 +1,7 @@
 mod expr_parser;
 mod lower_nfa;
 mod nsm;
+mod parse;
 mod types;
 
 pub use expr_parser::parse_grammarex;
