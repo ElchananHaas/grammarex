@@ -1,6 +1,7 @@
 mod expr_parser;
 mod lower_nfa;
 mod nsm;
+mod nsms;
 mod parse;
 mod types;
 
