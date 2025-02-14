@@ -1,4 +1,5 @@
 mod expr_parser;
+mod lower_grammarex;
 mod lower_nfa;
 mod nsm;
 mod nsms;

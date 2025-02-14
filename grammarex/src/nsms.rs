@@ -1,33 +1,23 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+};
+
+use thiserror::Error;
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
-pub enum CharClass {
+pub enum CharMatch {
+    Epsilon,
     Char(char),
     RangeInclusive(char, char),
 }
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
-pub enum EpsCharMatch {
-    Epsilon,
-    Match(CharClass),
-}
-//An edge of the NSM that consumes input
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
-pub struct NsmConsumeEdge {
-    char_match: CharClass,
-    target_node: usize,
-}
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
-pub enum NsmEdgeTransition {
-    Consume(NsmConsumeEdge),
-    Call(CallData),
-    //An edge of the NSM that returns to an unknown place and therefore
-    //doesn't consume input.
-    Return,
-}
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NsmEdgeData {
-    pub transition: NsmEdgeTransition,
-    pub actions: Vec<Action>,
+
+#[derive(Error, Debug)]
+pub enum LoweringError {
+    #[error("Invalid variable assignment")]
+    InvalidVariableAssignment,
+    #[error("Couldn't locate expression `{0}`")]
+    UnknownExpression(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,33 +26,40 @@ pub enum Action {
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CallData {
-    name: String,
-    target_node: usize,
-    return_node: usize,
+    pub name: String,
+    pub target_machine: usize,
+    pub target_node: usize,
+    pub return_node: usize,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
-pub enum EpsNsmEdgeTransition {
-    Move(EpsCharMatch, usize),
+pub enum NsmEdgeTransition {
+    Move(CharMatch, usize),
     Call(CallData),
     //An edge of the NSM that returns to an unknown place and therefore
     //doesn't consume input.
     Return,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NsmEdgeData {
+    pub transition: NsmEdgeTransition,
+    pub actions: Vec<Action>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Machine<EdgeData> {
-    pub edges: Vec<Vec<EdgeData>>,
+pub struct Machine {
+    pub edges: Vec<Vec<NsmEdgeData>>,
     pub accepts_epsilon: bool,
     pub starting_node: usize,
 }
 
-pub struct Machines<EdgeData> {
-    pub machines: Vec<Machine<EdgeData>>,
+pub struct Machines {
+    pub machines: Vec<Machine>,
     pub names_mapping: HashMap<String, usize>,
 }
 
-impl<EdgeData> Machine<EdgeData> {
+impl Machine {
     pub fn new() -> Self {
         Self {
             edges: vec![],
@@ -74,11 +71,15 @@ impl<EdgeData> Machine<EdgeData> {
 
 pub struct MachineBuilder {
     edges: Vec<VecDeque<NsmEdgeData>>,
+    names: Rc<HashMap<String, usize>>,
 }
 
 impl MachineBuilder {
     pub fn new() -> Self {
-        Self { edges: Vec::new() }
+        Self {
+            edges: Vec::new(),
+            names: Rc::new(HashMap::new()),
+        }
     }
 
     pub fn create_node(&mut self) -> usize {
@@ -90,7 +91,17 @@ impl MachineBuilder {
         &mut self.edges[idx]
     }
 
-    pub fn build(self) -> Machine<NsmEdgeData> {
+    pub fn set_names(&mut self, names: Rc<HashMap<String, usize>>) {
+        self.names = names;
+    }
+
+    pub fn get_name(&self, name: &str) -> Result<usize, LoweringError> {
+        self.names
+            .get(name)
+            .ok_or_else(|| LoweringError::UnknownExpression(name.to_string()))
+            .copied()
+    }
+    pub fn build(self) -> Machine {
         Machine {
             edges: self
                 .edges
