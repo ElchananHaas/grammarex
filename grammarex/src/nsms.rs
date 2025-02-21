@@ -50,7 +50,7 @@ pub struct NsmEdgeData {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Machine {
     pub edges: Vec<Vec<NsmEdgeData>>,
-    pub accepts_epsilon: bool,
+    pub accept_epsilon_actions: Option<Vec<Action>>,
     pub starting_node: usize,
 }
 
@@ -63,9 +63,14 @@ impl Machine {
     pub fn new() -> Self {
         Self {
             edges: vec![],
-            accepts_epsilon: false,
+            accept_epsilon_actions: None,
             starting_node: 0,
         }
+    }
+
+    pub fn create_node(&mut self) -> usize {
+        self.edges.push(Vec::new());
+        self.edges.len() - 1
     }
 }
 
@@ -108,7 +113,7 @@ impl MachineBuilder {
                 .into_iter()
                 .map(|edge| edge.into_iter().collect())
                 .collect(),
-            accepts_epsilon: false,
+            accept_epsilon_actions: None,
             starting_node: 0,
         }
     }
