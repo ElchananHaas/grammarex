@@ -7,8 +7,7 @@ use crate::{
     types::GrammarEx,
 };
 
-
-fn lower_grammarex(input: &HashMap<String, GrammarEx>) -> Result<Vec<Machine>, LoweringError> {
+pub fn lower_grammarex(input: &HashMap<String, GrammarEx>) -> Result<Vec<Machine>, LoweringError> {
     let mut names: HashMap<String, usize> = HashMap::new();
     let mut builders = Vec::new();
     for (i, (name, expr)) in input.into_iter().enumerate() {
@@ -20,12 +19,10 @@ fn lower_grammarex(input: &HashMap<String, GrammarEx>) -> Result<Vec<Machine>, L
         builder.set_names(Rc::clone(&names));
         builder.create_node();
         let end = lower_grammarex_rec(builder, 0, *val)?;
-        builder.get_node_mut(end).push_back(
-            NsmEdgeData {
-                transition: NsmEdgeTransition::Return,
-                actions: vec![],
-            }
-        );
+        builder.get_node_mut(end).push_back(NsmEdgeData {
+            transition: NsmEdgeTransition::Return,
+            actions: vec![],
+        });
     }
     Ok(builders
         .into_iter()

@@ -5,7 +5,7 @@ use std::{
 
 use thiserror::Error;
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
 pub enum CharMatch {
     Epsilon,
     Char(char),
@@ -20,11 +20,11 @@ pub enum LoweringError {
     UnknownExpression(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
     Assign(String, String),
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CallData {
     pub name: String,
     pub target_machine: usize,
@@ -32,7 +32,7 @@ pub struct CallData {
     pub return_node: usize,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
 pub enum NsmEdgeTransition {
     Move(CharMatch, usize),
     Call(CallData),
@@ -41,7 +41,7 @@ pub enum NsmEdgeTransition {
     Return,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NsmEdgeData {
     pub transition: NsmEdgeTransition,
     pub actions: Vec<Action>,

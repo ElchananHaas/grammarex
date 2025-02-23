@@ -1,3 +1,4 @@
+mod elim_epsilon;
 mod expr_parser;
 mod lower_grammarex;
 mod lower_nfa;
@@ -5,7 +6,6 @@ mod nsm;
 mod nsms;
 mod parse;
 mod types;
-mod elim_epsilon;
 
 pub use expr_parser::parse_grammarex;
 pub use expr_parser::GrammarexParseError;
