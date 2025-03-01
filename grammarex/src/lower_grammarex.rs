@@ -118,7 +118,6 @@ fn lower_grammarex_rec(
             let machine = builder.get_name(&expr)?;
             let return_node = builder.create_node();
             let call_data = CallData {
-                target_node: 0,
                 name: expr.clone(),
                 return_node,
                 target_machine: machine,
@@ -133,7 +132,6 @@ fn lower_grammarex_rec(
             let machine = builder.get_name(&expr)?;
             let return_node = builder.create_node();
             let call_data = CallData {
-                target_node: 0,
                 name: expr.clone(),
                 return_node,
                 target_machine: machine,

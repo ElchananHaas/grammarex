@@ -132,7 +132,7 @@ fn replace_with_epsilon_closure<'a>(
                 //If we already processed the node, no need to explore it.
                 if !visit_set.contains(&call_data.return_node) {
                     if let Some(bypass_actions) =
-                        &machines[call_data.target_node].accept_epsilon_actions
+                        &machines[0].accept_epsilon_actions
                     {
                         //Add in any actions used in the bypass.
                         for action in bypass_actions {
@@ -201,8 +201,16 @@ fn deduplicate(machines: &Vec<Machine>) -> Vec<Machine> {
     res
 }
 
+
 fn remap(idx: usize, machines: &Vec<Machine>, remappings: &Vec<(Vec<usize>, usize)>) -> Machine {
     let mut res = Machine::new();
+    remap_into_machine(idx, machines, &mut res, remappings);
+    res
+}
+fn remap_into_machine(idx: usize, 
+                     machines: &Vec<Machine>, 
+                     res: &mut Machine,
+                     remappings: &Vec<(Vec<usize>, usize)>) {
     let mut remapped = vec![None; remappings[idx].1];
     for i in 0..machines[idx].edges.len() {
         let mapped_to = remappings[idx].0[i];
@@ -220,7 +228,6 @@ fn remap(idx: usize, machines: &Vec<Machine>, remappings: &Vec<(Vec<usize>, usiz
         .map(|edges| edges.expect("All edges were mapped"))
         .collect();
     res.accept_epsilon_actions = machines[idx].accept_epsilon_actions.clone();
-    res
 }
 
 fn remap_edge(
@@ -236,7 +243,6 @@ fn remap_edge(
             NsmEdgeTransition::Call(call_data) => NsmEdgeTransition::Call(CallData {
                 name: call_data.name.clone(),
                 target_machine: call_data.target_machine,
-                target_node: remappings[call_data.target_machine].0[call_data.target_node],
                 return_node: remappings[idx].0[call_data.return_node],
             }),
             NsmEdgeTransition::Return => NsmEdgeTransition::Return,
@@ -244,6 +250,7 @@ fn remap_edge(
         actions: edge.actions.clone(),
     }
 }
+
 fn node_dedup_mapping(machine: &Machine) -> (Vec<usize>, usize) {
     let mut count = 0;
     let mut mapping = Vec::new();
@@ -258,6 +265,41 @@ fn node_dedup_mapping(machine: &Machine) -> (Vec<usize>, usize) {
         }
     }
     (mapping, count)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RetData {
+    pub target_machine: usize,
+    pub return_node: usize,
+}
+
+
+fn greibachize(machines: &Vec<Machine>, idx: usize) {
+    let mut visit_set = vec![false; machines.len()];
+    let mut rets : Vec<Vec<RetData>> = vec![Vec::new(); machines.len()];
+    let mut res = Machine::new();
+    direct_call_graph_visit(machines, idx, &mut visit_set, &mut rets, &mut res);
+}
+
+fn direct_call_graph_visit(machines: &Vec<Machine>, 
+                           idx: usize, 
+                           visit_set: &mut Vec<bool>,
+                           rets: &mut Vec<Vec<RetData>>,
+                           new_machine: &mut Machine) {
+    if visit_set[idx] {
+        return;
+    }
+    visit_set[idx] = true;
+    let machine = &machines[idx];
+    for edge in &machine.edges[0] {
+        if let NsmEdgeTransition::Call(call_data) = &edge.transition {
+            rets[call_data.target_machine].push(RetData {
+                target_machine: idx,
+                return_node: call_data.return_node,
+            });
+            direct_call_graph_visit(machines, call_data.target_machine, visit_set, rets, new_machine);
+        }
+    }
 }
 
 fn compile(machines: &HashMap<String, GrammarEx>) -> Vec<Machine> {

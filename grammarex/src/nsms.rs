@@ -28,7 +28,6 @@ pub enum Action {
 pub struct CallData {
     pub name: String,
     pub target_machine: usize,
-    pub target_node: usize,
     pub return_node: usize,
 }
 
@@ -51,7 +50,6 @@ pub struct NsmEdgeData {
 pub struct Machine {
     pub edges: Vec<Vec<NsmEdgeData>>,
     pub accept_epsilon_actions: Option<Vec<Action>>,
-    pub starting_node: usize,
 }
 
 pub struct Machines {
@@ -64,7 +62,6 @@ impl Machine {
         Self {
             edges: vec![],
             accept_epsilon_actions: None,
-            starting_node: 0,
         }
     }
 
@@ -114,7 +111,6 @@ impl MachineBuilder {
                 .map(|edge| edge.into_iter().collect())
                 .collect(),
             accept_epsilon_actions: None,
-            starting_node: 0,
         }
     }
 }
