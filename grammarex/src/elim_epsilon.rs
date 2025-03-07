@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{lower_grammarex::lower_grammarex, nsms::{Action, CallData, CharMatch, Machine, NsmEdgeData, NsmEdgeTransition}, GrammarEx};
+use crate::{
+    lower_grammarex::lower_grammarex,
+    nsms::{Action, CallData, CharMatch, Machine, NsmEdgeData, NsmEdgeTransition},
+    GrammarEx,
+};
 
 fn build_epsilon_bypasses(machines: &mut Vec<Machine>) {
     let mut made_progress;
@@ -131,9 +135,7 @@ fn replace_with_epsilon_closure<'a>(
                 //If the state being called accepts epsilon, bypass it in epsilon elimination
                 //If we already processed the node, no need to explore it.
                 if !visit_set.contains(&call_data.return_node) {
-                    if let Some(bypass_actions) =
-                        &machines[0].accept_epsilon_actions
-                    {
+                    if let Some(bypass_actions) = &machines[0].accept_epsilon_actions {
                         //Add in any actions used in the bypass.
                         for action in bypass_actions {
                             actions.push(action.clone());
@@ -196,29 +198,25 @@ fn deduplicate(machines: &Vec<Machine>) -> Vec<Machine> {
         .map(|machine| node_dedup_mapping(machine))
         .collect();
     for i in 0..machines.len() {
-        res.push(remap(i, machines, &remappings));
+        res.push(remap(&machines[i], &remappings[i]));
     }
     res
 }
 
-
-fn remap(idx: usize, machines: &Vec<Machine>, remappings: &Vec<(Vec<usize>, usize)>) -> Machine {
+fn remap(machine: &Machine, remapping: &(Vec<usize>, usize)) -> Machine {
     let mut res = Machine::new();
-    remap_into_machine(idx, machines, &mut res, remappings);
+    remap_into_machine(&machine, &mut res, remapping);
     res
 }
-fn remap_into_machine(idx: usize, 
-                     machines: &Vec<Machine>, 
-                     res: &mut Machine,
-                     remappings: &Vec<(Vec<usize>, usize)>) {
-    let mut remapped = vec![None; remappings[idx].1];
-    for i in 0..machines[idx].edges.len() {
-        let mapped_to = remappings[idx].0[i];
+fn remap_into_machine(machine: &Machine, res: &mut Machine, remapping: &(Vec<usize>, usize)) {
+    let mut remapped = vec![None; remapping.1];
+    for i in 0..machine.edges.len() {
+        let mapped_to = remapping.0[i];
         if remapped[mapped_to].is_none() {
-            let edges = &machines[idx].edges[i];
+            let edges = &machine.edges[i];
             let new_edges: Vec<NsmEdgeData> = edges
                 .iter()
-                .map(|edge| remap_edge(edge, idx, remappings))
+                .map(|edge| remap_edge(edge, &remapping))
                 .collect();
             remapped[mapped_to] = Some(new_edges);
         }
@@ -227,23 +225,19 @@ fn remap_into_machine(idx: usize,
         .into_iter()
         .map(|edges| edges.expect("All edges were mapped"))
         .collect();
-    res.accept_epsilon_actions = machines[idx].accept_epsilon_actions.clone();
+    res.accept_epsilon_actions = machine.accept_epsilon_actions.clone();
 }
 
-fn remap_edge(
-    edge: &NsmEdgeData,
-    idx: usize,
-    remappings: &Vec<(Vec<usize>, usize)>,
-) -> NsmEdgeData {
+fn remap_edge(edge: &NsmEdgeData, remapping: &(Vec<usize>, usize)) -> NsmEdgeData {
     NsmEdgeData {
         transition: match &edge.transition {
             NsmEdgeTransition::Move(char_match, target) => {
-                NsmEdgeTransition::Move(char_match.clone(), remappings[idx].0[*target])
+                NsmEdgeTransition::Move(char_match.clone(), remapping.0[*target])
             }
             NsmEdgeTransition::Call(call_data) => NsmEdgeTransition::Call(CallData {
                 name: call_data.name.clone(),
                 target_machine: call_data.target_machine,
-                return_node: remappings[idx].0[call_data.return_node],
+                return_node: remapping.0[call_data.return_node],
             }),
             NsmEdgeTransition::Return => NsmEdgeTransition::Return,
         },
@@ -273,23 +267,47 @@ pub struct RetData {
     pub return_node: usize,
 }
 
-
 fn greibachize(machines: &Vec<Machine>, idx: usize) {
     let mut visit_set = vec![false; machines.len()];
-    let mut rets : Vec<Vec<RetData>> = vec![Vec::new(); machines.len()];
+    let mut rets: Vec<Vec<RetData>> = vec![Vec::new(); machines.len()];
+    let mut starts_and_lens: Vec<Option<(usize, usize)>> = vec![Some((0, 0)); machines.len()];
     let mut res = Machine::new();
-    direct_call_graph_visit(machines, idx, &mut visit_set, &mut rets, &mut res);
+    direct_call_graph_visit(
+        machines,
+        idx,
+        &mut visit_set,
+        &mut starts_and_lens,
+        &mut rets,
+        &mut res,
+    );
 }
 
-fn direct_call_graph_visit(machines: &Vec<Machine>, 
-                           idx: usize, 
-                           visit_set: &mut Vec<bool>,
-                           rets: &mut Vec<Vec<RetData>>,
-                           new_machine: &mut Machine) {
+fn patch_returns(machine: &mut Machine, starts_and_lens: &Vec<Option<(usize, usize)>>) {
+    //Don't remap returns for the first machine.
+    for item in &starts_and_lens[1..] {
+
+    }
+}
+fn direct_call_graph_visit(
+    machines: &Vec<Machine>,
+    idx: usize,
+    visit_set: &mut Vec<bool>,
+    starts_and_lens: &mut Vec<Option<(usize, usize)>>,
+    rets: &mut Vec<Vec<RetData>>,
+    new_machine: &mut Machine,
+) {
     if visit_set[idx] {
         return;
     }
     visit_set[idx] = true;
+    let remapping_size = machines[idx].edges.len();
+    let new_start = new_machine.edges.len();
+    starts_and_lens[idx] = Some((new_start, remapping_size));
+    let remapping = (
+        (new_start..remapping_size).into_iter().collect(),
+        remapping_size,
+    );
+    remap_into_machine(&machines[idx], new_machine, &remapping);
     let machine = &machines[idx];
     for edge in &machine.edges[0] {
         if let NsmEdgeTransition::Call(call_data) = &edge.transition {
@@ -297,20 +315,27 @@ fn direct_call_graph_visit(machines: &Vec<Machine>,
                 target_machine: idx,
                 return_node: call_data.return_node,
             });
-            direct_call_graph_visit(machines, call_data.target_machine, visit_set, rets, new_machine);
+            direct_call_graph_visit(
+                machines,
+                call_data.target_machine,
+                visit_set,
+                starts_and_lens,
+                rets,
+                new_machine,
+            );
         }
     }
 }
 
 fn compile(machines: &HashMap<String, GrammarEx>) -> Vec<Machine> {
     let machines = lower_grammarex(&machines).unwrap();
-    //Do a deduplication pass before epsilon elimination to reduce the number of nodes. 
+    //Do a deduplication pass before epsilon elimination to reduce the number of nodes.
     //It should give the same result as performing epsilon elimination before deduplicating,
-    //but deduplication is relatively cheap. 
+    //but deduplication is relatively cheap.
     let mut machines = deduplicate(&machines);
     build_epsilon_bypasses(&mut machines);
     let machines = elim_all_epsilons(&machines);
-    //Epsilon elimiation creates duplicate nodes, remove them.
+    //Epsilon elimination creates duplicate nodes, remove them.
     let machines = deduplicate(&machines);
     machines
 }
