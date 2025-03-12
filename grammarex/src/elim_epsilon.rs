@@ -135,7 +135,9 @@ fn replace_with_epsilon_closure<'a>(
                 //If the state being called accepts epsilon, bypass it in epsilon elimination
                 //If we already processed the node, no need to explore it.
                 if !visit_set.contains(&call_data.return_node) {
-                    if let Some(bypass_actions) = &machines[0].accept_epsilon_actions {
+                    if let Some(bypass_actions) =
+                        &machines[call_data.target_machine].accept_epsilon_actions
+                    {
                         //Add in any actions used in the bypass.
                         for action in bypass_actions {
                             actions.push(action.clone());
@@ -179,10 +181,14 @@ fn replace_with_epsilon_closure<'a>(
                 }
             }
             NsmEdgeTransition::Return => {
-                new_machine.edges[start_node].push(NsmEdgeData {
-                    transition: NsmEdgeTransition::Return,
-                    actions: actions.clone(),
-                });
+                //Remove returns for the start node. These are captured in the
+                //accept epsilon actions and should be removed from here.
+                if start_node != 0 {
+                    new_machine.edges[start_node].push(NsmEdgeData {
+                        transition: NsmEdgeTransition::Return,
+                        actions: actions.clone(),
+                    });
+                }
             }
         }
         for _ in &edge.actions {
@@ -205,27 +211,22 @@ fn deduplicate(machines: &Vec<Machine>) -> Vec<Machine> {
 
 fn remap(machine: &Machine, remapping: &(Vec<usize>, usize)) -> Machine {
     let mut res = Machine::new();
+    res.edges = vec![vec![]; remapping.1];
     remap_into_machine(&machine, &mut res, remapping);
+    res.accept_epsilon_actions = machine.accept_epsilon_actions.clone();
     res
 }
+
 fn remap_into_machine(machine: &Machine, res: &mut Machine, remapping: &(Vec<usize>, usize)) {
-    let mut remapped = vec![None; remapping.1];
     for i in 0..machine.edges.len() {
         let mapped_to = remapping.0[i];
-        if remapped[mapped_to].is_none() {
-            let edges = &machine.edges[i];
-            let new_edges: Vec<NsmEdgeData> = edges
-                .iter()
-                .map(|edge| remap_edge(edge, &remapping))
-                .collect();
-            remapped[mapped_to] = Some(new_edges);
-        }
+        let edges = &machine.edges[i];
+        let new_edges: Vec<NsmEdgeData> = edges
+            .iter()
+            .map(|edge| remap_edge(edge, &remapping))
+            .collect();
+        res.edges[mapped_to] = new_edges;
     }
-    res.edges = remapped
-        .into_iter()
-        .map(|edges| edges.expect("All edges were mapped"))
-        .collect();
-    res.accept_epsilon_actions = machine.accept_epsilon_actions.clone();
 }
 
 fn remap_edge(edge: &NsmEdgeData, remapping: &(Vec<usize>, usize)) -> NsmEdgeData {
@@ -267,11 +268,12 @@ pub struct RetData {
     pub return_node: usize,
 }
 
-fn greibachize(machines: &Vec<Machine>, idx: usize) {
+fn greibachize(machines: &Vec<Machine>, idx: usize) -> Machine {
     let mut visit_set = vec![false; machines.len()];
     let mut rets: Vec<Vec<RetData>> = vec![Vec::new(); machines.len()];
     let mut starts_and_lens: Vec<Option<(usize, usize)>> = vec![Some((0, 0)); machines.len()];
     let mut res = Machine::new();
+    res.accept_epsilon_actions = machines[idx].accept_epsilon_actions.clone();
     direct_call_graph_visit(
         machines,
         idx,
@@ -280,12 +282,60 @@ fn greibachize(machines: &Vec<Machine>, idx: usize) {
         &mut rets,
         &mut res,
     );
+    patch_greibach_remapped(&mut res, &starts_and_lens, &rets);
+    res
 }
 
-fn patch_returns(machine: &mut Machine, starts_and_lens: &Vec<Option<(usize, usize)>>) {
-    //Don't remap returns for the first machine.
-    for item in &starts_and_lens[1..] {
-
+fn patch_greibach_remapped(
+    machine: &mut Machine,
+    starts_and_lens: &Vec<Option<(usize, usize)>>,
+    rets: &Vec<Vec<RetData>>,
+) {
+    //Patch calls
+    for item in starts_and_lens.into_iter() {
+        if let Some((start, _)) = item {
+            for edge in &mut machine.edges[*start] {
+                if let NsmEdgeTransition::Call(call_data) = &mut edge.transition {
+                    edge.transition = NsmEdgeTransition::Move(
+                        CharMatch::Epsilon,
+                        starts_and_lens[call_data.target_machine]
+                            .expect("Callee was remapped")
+                            .0,
+                    );
+                }
+            }
+        }
+    }
+    //Patch returns
+    for (machine_idx, item) in starts_and_lens.into_iter().enumerate() {
+        if let Some((start, len)) = item {
+            for i in *start..(start + len) {
+                let edges = &machine.edges[i];
+                let mut new_edges = Vec::new();
+                for edge in edges {
+                    if let NsmEdgeTransition::Return = edge.transition {
+                        for ret in &rets[machine_idx] {
+                            let caller_data =
+                                starts_and_lens[ret.target_machine].expect("Caller was remapped");
+                            assert!(ret.return_node < caller_data.1);
+                            let ret_idx = caller_data.0 + ret.return_node;
+                            //This might need some more work to build values correctly.
+                            new_edges.push(NsmEdgeData {
+                                transition: NsmEdgeTransition::Move(CharMatch::Epsilon, ret_idx),
+                                actions: vec![],
+                            });
+                        }
+                        //Returns for the first machine get to stay too.
+                        if *start == 0 {
+                            new_edges.push(edge.clone());
+                        }
+                    } else {
+                        new_edges.push(edge.clone());
+                    }
+                }
+                machine.edges[i] = new_edges;
+            }
+        }
     }
 }
 fn direct_call_graph_visit(
@@ -303,8 +353,13 @@ fn direct_call_graph_visit(
     let remapping_size = machines[idx].edges.len();
     let new_start = new_machine.edges.len();
     starts_and_lens[idx] = Some((new_start, remapping_size));
+    for _ in 0..remapping_size {
+        new_machine.edges.push(vec![]);
+    }
     let remapping = (
-        (new_start..remapping_size).into_iter().collect(),
+        (new_start..(new_start + remapping_size))
+            .into_iter()
+            .collect(),
         remapping_size,
     );
     remap_into_machine(&machines[idx], new_machine, &remapping);
@@ -335,7 +390,14 @@ fn compile(machines: &HashMap<String, GrammarEx>) -> Vec<Machine> {
     let mut machines = deduplicate(&machines);
     build_epsilon_bypasses(&mut machines);
     let machines = elim_all_epsilons(&machines);
+    dbg!(&machines);
     //Epsilon elimination creates duplicate nodes, remove them.
+    let machines = deduplicate(&machines);
+    let machines: Vec<Machine> = (0..machines.len())
+        .map(|i| greibachize(&machines, i))
+        .collect();
+    //Greibachizing introduces epsilon edges, clean up the machines again.
+    let machines = elim_all_epsilons(&machines);
     let machines = deduplicate(&machines);
     machines
 }
@@ -394,7 +456,7 @@ mod tests {
     #[test]
     fn test_lower_call_epsilon() {
         let expr_one = parse_grammarex(&mut r#" abc = second "#).unwrap();
-        let expr_two = parse_grammarex(&mut r#" "x"? "#).unwrap();
+        let expr_two = parse_grammarex(&mut r#" "x"?"y"?"z"? "#).unwrap();
         let start = "start".to_string();
         let second = "second".to_string();
         let mut machines = HashMap::new();
@@ -407,7 +469,7 @@ mod tests {
     #[test]
     fn test_lower_call_epsilon_two() {
         let expr_one = parse_grammarex(&mut r#" abc = second "x" "#).unwrap();
-        let expr_two = parse_grammarex(&mut r#" "x"? "#).unwrap();
+        let expr_two = parse_grammarex(&mut r#" "yz"? "#).unwrap();
         let start = "start".to_string();
         let second = "second".to_string();
         let mut machines = HashMap::new();
