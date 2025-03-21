@@ -390,7 +390,6 @@ fn compile(machines: &HashMap<String, GrammarEx>) -> Vec<Machine> {
     let mut machines = deduplicate(&machines);
     build_epsilon_bypasses(&mut machines);
     let machines = elim_all_epsilons(&machines);
-    dbg!(&machines);
     //Epsilon elimination creates duplicate nodes, remove them.
     let machines = deduplicate(&machines);
     let machines: Vec<Machine> = (0..machines.len())

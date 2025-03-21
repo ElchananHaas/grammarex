@@ -5,13 +5,22 @@ use std::{
 
 use thiserror::Error;
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Hash)]
 pub enum CharMatch {
     Epsilon,
     Char(char),
     RangeInclusive(char, char),
 }
 
+impl CharMatch {
+    pub fn matches(self, c: char) -> bool {
+        match self {
+            CharMatch::Epsilon => panic!("Epsilon transitions cannot be matched!"),
+            CharMatch::Char(c2) => c2 == c,
+            CharMatch::RangeInclusive(c_start, c_end) => c_start <= c && c <= c_end,
+        }
+    }
+}
 #[derive(Error, Debug)]
 pub enum LoweringError {
     #[error("Invalid variable assignment")]
