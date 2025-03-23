@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     lower_grammarex::lower_grammarex,
-    nsms::{Action, CallData, CharMatch, Machine, NsmEdgeData, NsmEdgeTransition},
+    nsms::{Action, CallData, CharMatch, LoweringError, Machine, NsmEdgeData, NsmEdgeTransition},
     GrammarEx,
 };
 
@@ -382,8 +382,8 @@ fn direct_call_graph_visit(
     }
 }
 
-fn compile(machines: &HashMap<String, GrammarEx>) -> Vec<Machine> {
-    let machines = lower_grammarex(&machines).unwrap();
+pub fn compile(machines: &HashMap<String, GrammarEx>) -> Result<Vec<Machine>, LoweringError> {
+    let machines = lower_grammarex(&machines)?;
     //Do a deduplication pass before epsilon elimination to reduce the number of nodes.
     //It should give the same result as performing epsilon elimination before deduplicating,
     //but deduplication is relatively cheap.
@@ -398,7 +398,7 @@ fn compile(machines: &HashMap<String, GrammarEx>) -> Vec<Machine> {
     //Greibachizing introduces epsilon edges, clean up the machines again.
     let machines = elim_all_epsilons(&machines);
     let machines = deduplicate(&machines);
-    machines
+    Ok(machines)
 }
 
 #[cfg(test)]

@@ -52,6 +52,31 @@ struct Gss {
     counted: CountedStates,
 }
 
+impl Gss {
+    fn new(machines: &Vec<Machine>) -> Self {
+        let active = machines
+            .into_iter()
+            .map(|_machine| MachineArena { states: vec![] })
+            .collect();
+        let frozen = machines
+            .into_iter()
+            .map(|_machine| MachineArena { states: vec![] })
+            .collect();
+        let counted = machines
+            .into_iter()
+            .map(|machine| PerMachineSetArena {
+                num_states: machine.edges.len(),
+                sets: vec![],
+            })
+            .collect();
+
+        Gss {
+            active: ActiveStates { active },
+            frozen: FrozenStates { frozen },
+            counted: CountedStates { arenas: counted },
+        }
+    }
+}
 struct CountedStates {
     arenas: Vec<PerMachineSetArena>,
 }
@@ -109,12 +134,8 @@ impl FrozenStates {
     }
 }
 
-fn run(machines: &Vec<Machine>, input: &str) {
-    let mut gss = Gss {
-        active: ActiveStates { active: vec![] },
-        frozen: FrozenStates { frozen: vec![] },
-        counted: CountedStates { arenas: vec![] },
-    };
+fn run(machines: &Vec<Machine>, input: &str) -> Vec<MachineRef> {
+    let mut gss = Gss::new(machines);
     let set = gss.counted.create(0);
     let init_state = gss.active.create_state(
         MachineState {
@@ -139,9 +160,10 @@ fn run(machines: &Vec<Machine>, input: &str) {
         }
         machine_refs = new_states;
     }
-    dbg!(machine_refs);
+    dbg!(&machine_refs);
+    machine_refs
 }
-//TODO add proper refcounting, initialization, resetting.
+
 fn advance_machine(
     gss: &mut Gss,
     machines: &Vec<Machine>,
@@ -231,5 +253,32 @@ fn advance_machine(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::{elim_epsilon::compile, parse_grammarex};
+
+    use super::*;
+
+    #[test]
+    fn test_a() {
+        let expr = parse_grammarex(&mut "[cba]").unwrap();
+        let start = "start".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr);
+        let machines = compile(&machines).unwrap();
+        dbg!(&machines);
+        let res = run(&machines, "a");
+        assert!(res.len() == 1);
+        let res = run(&machines, "c");
+        assert!(res.len() == 1);
+        let res = run(&machines, "d");
+        assert!(res.len() == 0);
+        let res = run(&machines, "aa");
+        assert!(res.len() == 0);
     }
 }
