@@ -76,31 +76,31 @@ impl Gss {
         Gss {
             active: ActiveStates { active },
             frozen: FrozenStates { frozen },
-            counted: CountedStates { arenas: counted },
+            counted: CountedStates { counted },
         }
     }
 }
 #[derive(Debug)]
 struct CountedStates {
-    arenas: Vec<PerMachineSetArena>,
+    counted: Vec<PerMachineSetArena>,
 }
 
 impl CountedStates {
     fn create(&mut self, arena: usize) -> usize {
-        let num_states = self.arenas[arena].num_states;
-        self.arenas[arena].sets.push(PerMachineSet {
+        let num_states = self.counted[arena].num_states;
+        self.counted[arena].sets.push(PerMachineSet {
             states: vec![false; num_states],
             parents: Vec::new(),
         });
-        self.arenas[arena].sets.len() - 1
+        self.counted[arena].sets.len() - 1
     }
 
     fn get(&self, arena: usize, idx: usize) -> &PerMachineSet {
-        &self.arenas[arena].sets[idx]
+        &self.counted[arena].sets[idx]
     }
 
     fn get_mut(&mut self, arena: usize, idx: usize) -> &mut PerMachineSet {
-        &mut self.arenas[arena].sets[idx]
+        &mut self.counted[arena].sets[idx]
     }
 }
 
@@ -169,8 +169,6 @@ fn run(machines: &Vec<Machine>, input: &str) -> Vec<MachineRef> {
                 char,
             );
         }
-        dbg!(&gss);
-        dbg!(&new_states);
         machine_refs = new_states;
     }
     machine_refs
@@ -282,9 +280,8 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr);
-        let machines = compile(&machines).unwrap();
-        dbg!(&machines);
-        let res = run(&machines, "a");
+        let machines: Vec<Machine> = compile(&machines).unwrap();
+        let res: Vec<MachineRef> = run(&machines, "a");
         assert!(res.len() == 1);
         let res = run(&machines, "c");
         assert!(res.len() == 1);
@@ -303,5 +300,9 @@ mod tests {
         let machines = compile(&machines).unwrap();
         let res = run(&machines, "(a)");
         assert!(res.len() == 1);
+        let res = run(&machines, "(a");
+        assert!(res.len() == 1);
+        let res = run(&machines, "(ab");
+        assert!(res.len() == 0);
     }
 }

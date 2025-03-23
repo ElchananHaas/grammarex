@@ -1,6 +1,6 @@
 mod elim_epsilon;
 mod expr_parser;
-mod gll_strat;
+mod bfs_gll_strat;
 mod lower_grammarex;
 mod nsms;
 mod types;
