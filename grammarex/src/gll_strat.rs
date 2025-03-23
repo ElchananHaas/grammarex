@@ -49,7 +49,35 @@ struct PerMachineSet {
 struct Gss {
     active: ActiveStates,
     frozen: FrozenStates,
-    counted: Vec<PerMachineSet>,
+    counted: CountedStates,
+}
+
+struct CountedStates {
+    arenas: Vec<PerMachineSetArena>,
+}
+
+impl CountedStates {
+    fn create(&mut self, arena: usize) -> usize {
+        let num_states = self.arenas[arena].num_states;
+        self.arenas[arena].sets.push(PerMachineSet {
+            states: vec![false; num_states],
+            parents: Vec::new(),
+        });
+        self.arenas[arena].sets.len() - 1
+    }
+
+    fn get(&self, arena: usize, idx: usize) -> &PerMachineSet {
+        &self.arenas[arena].sets[idx]
+    }
+
+    fn get_mut(&mut self, arena: usize, idx: usize) -> &mut PerMachineSet {
+        &mut self.arenas[arena].sets[idx]
+    }
+}
+
+struct PerMachineSetArena {
+    num_states: usize,
+    sets: Vec<PerMachineSet>,
 }
 
 struct ActiveStates {
@@ -77,18 +105,7 @@ struct FrozenStates {
 impl FrozenStates {
     fn create_state(&mut self, state: MachineState, arena: usize) -> MachineRef {
         self.frozen[arena].states.push(state);
-        MachineRef::new(arena, self.frozen[arena].states.len() - 1 - 1)
-    }
-}
-
-impl Gss {
-
-    fn create_counted(&mut self) -> usize {
-        self.counted.push(PerMachineSet {
-            states: Vec::new(),
-            parents: Vec::new(),
-        });
-        self.counted.len() - 1
+        MachineRef::new(arena, self.frozen[arena].states.len() - 1)
     }
 }
 
@@ -96,16 +113,33 @@ fn run(machines: &Vec<Machine>, input: &str) {
     let mut gss = Gss {
         active: ActiveStates { active: vec![] },
         frozen: FrozenStates { frozen: vec![] },
-        counted: vec![]
+        counted: CountedStates { arenas: vec![] },
     };
-    let set = gss.create_counted();
-    gss.active.create_state(MachineState {
-        cur_state: 0,
-        active_states_idx: set,
-    }, 0);
+    let set = gss.counted.create(0);
+    let init_state = gss.active.create_state(
+        MachineState {
+            cur_state: 0,
+            active_states_idx: set,
+        },
+        0,
+    );
+    let mut machine_refs = vec![init_state];
     for char in input.chars() {
-        
+        let mut new_states = vec![];
+        let mut new_machine_active_state_idx = vec![None; machines.len()];
+        for r in &machine_refs {
+            advance_machine(
+                &mut gss,
+                machines,
+                *r,
+                &mut new_states,
+                &mut new_machine_active_state_idx,
+                char,
+            );
+        }
+        machine_refs = new_states;
     }
+    dbg!(machine_refs);
 }
 //TODO add proper refcounting, initialization, resetting.
 fn advance_machine(
@@ -121,8 +155,14 @@ fn advance_machine(
         match &edge.transition {
             NsmEdgeTransition::Move(char_match, target) => {
                 if char_match.matches(c) {
-                    if !gss.counted[state.active_states_idx].states[*target] {
-                        gss.counted[state.active_states_idx].states[*target] = true;
+                    if !gss
+                        .counted
+                        .get(machine_ref.machine(), state.active_states_idx)
+                        .states[*target]
+                    {
+                        gss.counted
+                            .get_mut(machine_ref.machine(), state.active_states_idx)
+                            .states[*target] = true;
                         let new_state = MachineState {
                             cur_state: *target,
                             active_states_idx: state.active_states_idx,
@@ -142,7 +182,7 @@ fn advance_machine(
                 );
                 let new_active_state = new_machine_active_state_idx[call_data.target_machine]
                     .unwrap_or_else(|| {
-                        let set = gss.create_counted();
+                        let set = gss.counted.create(call_data.target_machine);
                         gss.active.create_state(
                             MachineState {
                                 cur_state: 0,
@@ -162,11 +202,22 @@ fn advance_machine(
                     c,
                 );
                 let set_idx = gss.active.get(new_active_state).active_states_idx;
-                gss.counted[set_idx].parents.push(return_state);
+                gss.counted
+                    .get_mut(new_active_state.machine(), set_idx)
+                    .parents
+                    .push(return_state);
             }
             NsmEdgeTransition::Return => {
-                for i in 0..gss.counted[state.active_states_idx].parents.len() {
-                    let frozen_ref = gss.counted[state.active_states_idx].parents[i];
+                for i in 0..gss
+                    .counted
+                    .get(machine_ref.machine(), state.active_states_idx)
+                    .parents
+                    .len()
+                {
+                    let frozen_ref = gss
+                        .counted
+                        .get(machine_ref.machine(), state.active_states_idx)
+                        .parents[i];
                     let state = gss.active.get(machine_ref).clone();
                     let new_active = gss.active.create_state(state, frozen_ref.machine());
                     advance_machine(
