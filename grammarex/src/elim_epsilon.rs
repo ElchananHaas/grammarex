@@ -415,7 +415,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr);
-        let machines = compile(&machines);
+        let machines = compile(&machines).unwrap();
         dbg!(machines);
     }
 
@@ -428,7 +428,7 @@ mod tests {
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
         machines.insert(second.clone(), expr_two);
-        let machines = compile(&machines);
+        let machines = compile(&machines).unwrap();
         dbg!(machines);
     }
 
@@ -438,7 +438,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
-        let machines = compile(&machines);
+        let machines = compile(&machines).unwrap();
         dbg!(machines);
     }
 
@@ -448,7 +448,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
-        let machines = compile(&machines);
+        let machines = compile(&machines).unwrap();
         dbg!(machines);
     }
 
@@ -461,7 +461,7 @@ mod tests {
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
         machines.insert(second.clone(), expr_two);
-        let machines = compile(&machines);
+        let machines = compile(&machines).unwrap();
         dbg!(machines);
     }
 
@@ -474,7 +474,7 @@ mod tests {
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
         machines.insert(second.clone(), expr_two);
-        let machines = compile(&machines);
+        let machines = compile(&machines).unwrap();
         dbg!(machines);
     }
 
@@ -484,7 +484,7 @@ mod tests {
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
-        let machines = compile(&machines);
+        let machines = compile(&machines).unwrap();
         dbg!(machines);
     }
 }

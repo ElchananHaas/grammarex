@@ -23,7 +23,7 @@ impl MachineRef {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct MachineState {
     //Current state
     cur_state: usize,
@@ -32,10 +32,12 @@ struct MachineState {
     //This will get a field for [Local Variable State]
 }
 
+#[derive(Debug)]
 struct MachineArena {
     states: Vec<MachineState>,
 }
 
+#[derive(Debug)]
 //This stores the states of a given machine.
 struct PerMachineSet {
     //TODO - replace with bitset or something even more efficient.
@@ -46,6 +48,7 @@ struct PerMachineSet {
     parents: Vec<MachineRef>,
 }
 
+#[derive(Debug)]
 struct Gss {
     active: ActiveStates,
     frozen: FrozenStates,
@@ -77,6 +80,7 @@ impl Gss {
         }
     }
 }
+#[derive(Debug)]
 struct CountedStates {
     arenas: Vec<PerMachineSetArena>,
 }
@@ -100,11 +104,13 @@ impl CountedStates {
     }
 }
 
+#[derive(Debug)]
 struct PerMachineSetArena {
     num_states: usize,
     sets: Vec<PerMachineSet>,
 }
 
+#[derive(Debug)]
 struct ActiveStates {
     active: Vec<MachineArena>,
 }
@@ -123,6 +129,7 @@ impl ActiveStates {
     }
 }
 
+#[derive(Debug)]
 struct FrozenStates {
     frozen: Vec<MachineArena>,
 }
@@ -131,6 +138,10 @@ impl FrozenStates {
     fn create_state(&mut self, state: MachineState, arena: usize) -> MachineRef {
         self.frozen[arena].states.push(state);
         MachineRef::new(arena, self.frozen[arena].states.len() - 1)
+    }
+
+    fn get(&self, machine_ref: MachineRef) -> &MachineState {
+        &self.frozen[machine_ref.machine()].states[machine_ref.index()]
     }
 }
 
@@ -158,9 +169,10 @@ fn run(machines: &Vec<Machine>, input: &str) -> Vec<MachineRef> {
                 char,
             );
         }
+        dbg!(&gss);
+        dbg!(&new_states);
         machine_refs = new_states;
     }
-    dbg!(&machine_refs);
     machine_refs
 }
 
@@ -240,7 +252,7 @@ fn advance_machine(
                         .counted
                         .get(machine_ref.machine(), state.active_states_idx)
                         .parents[i];
-                    let state = gss.active.get(machine_ref).clone();
+                    let state = gss.frozen.get(frozen_ref).clone();
                     let new_active = gss.active.create_state(state, frozen_ref.machine());
                     advance_machine(
                         gss,
@@ -280,5 +292,16 @@ mod tests {
         assert!(res.len() == 0);
         let res = run(&machines, "aa");
         assert!(res.len() == 0);
+    }
+
+    #[test]
+    fn test_rec() {
+        let expr_one = parse_grammarex(&mut r#" "a" | \( start \) "#).unwrap();
+        let start = "start".to_string();
+        let mut machines = HashMap::new();
+        machines.insert(start.clone(), expr_one);
+        let machines = compile(&machines).unwrap();
+        let res = run(&machines, "(a)");
+        assert!(res.len() == 1);
     }
 }
