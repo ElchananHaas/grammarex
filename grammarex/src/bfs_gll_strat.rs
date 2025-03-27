@@ -119,10 +119,6 @@ impl ActiveStates {
         &self.active[machine_ref.machine()].states[machine_ref.index()]
     }
 
-    fn get_mut(&mut self, machine_ref: MachineRef) -> &mut MachineState {
-        &mut self.active[machine_ref.machine()].states[machine_ref.index()]
-    }
-
     fn create_state(&mut self, state: MachineState, arena: usize) -> MachineRef {
         self.active[arena].states.push(state);
         MachineRef::new(arena, self.active[arena].states.len() - 1)
@@ -145,7 +141,7 @@ impl FrozenStates {
     }
 }
 
-fn run(machines: &Vec<Machine>, input: &str) -> Vec<MachineRef> {
+pub fn run(machines: &Vec<Machine>, input: &str) -> Vec<MachineRef> {
     let mut gss = Gss::new(machines);
     let set = gss.counted.create(0);
     let init_state = gss.active.create_state(

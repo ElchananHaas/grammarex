@@ -61,11 +61,6 @@ pub struct Machine {
     pub accept_epsilon_actions: Option<Vec<Action>>,
 }
 
-pub struct Machines {
-    pub machines: Vec<Machine>,
-    pub names_mapping: HashMap<String, usize>,
-}
-
 impl Machine {
     pub fn new() -> Self {
         Self {

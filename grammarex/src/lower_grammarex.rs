@@ -109,7 +109,7 @@ fn lower_grammarex_rec(
             Ok(end_node)
         }
         GrammarEx::Assign(var, expr) => {
-            let GrammarEx::Var(var) = &**var else {
+            let GrammarEx::Var(_var) = &**var else {
                 return Err(LoweringError::InvalidVariableAssignment);
             };
             let GrammarEx::Var(expr) = &**expr else {
