@@ -12,6 +12,7 @@ impl QueueItemHeader {
         self.machine
     }
 }
+
 struct MultiQueue<'a> {
     var_sizes: &'a Vec<usize>,
     data: Vec<u8>,
@@ -53,7 +54,7 @@ impl<'a> Iterator for MultiQueueIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.offset < self.queue.data.len() {
             let data_ptr = &self.queue.data[self.offset] as *const u8 as *const QueueItemHeader;
-            let item = unsafe {
+            let item: &'a QueueItemHeader = unsafe {
                  &*data_ptr
             };
             let item_len = self.queue.item_size(item);
