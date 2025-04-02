@@ -1,7 +1,8 @@
-use std::{cell::UnsafeCell, num::NonZeroUsize};
+use std::{cell::UnsafeCell};
 
 use crate::nsms::{Machine, NsmEdgeTransition};
 
+#[derive(Debug)]
 pub struct ItemHeader {
     //The machine type
     machine: usize,
@@ -62,9 +63,11 @@ impl WaveFront {
             item = &mut *self.items[machine].get()
         }
         //Safety: If there is an immutable reference to a value this method
-        //will return another immutable reference and not alter the value.
+        //will return another immutable reference and not mutate the value.
         //It will only mutate the value if it is None, in which case there
         //are no references to it.
+        //items is a private field and there are never any external references
+        //to it so it is safe to mutate.
         item.get_or_insert_with(|| {
             to_clear.push(machine);
             f()
@@ -84,66 +87,23 @@ impl WaveFront {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct MachineRef(usize);
-
-impl MachineRef {
-    const INDEX_BITS: usize = 40;
-    pub fn new(machine: usize, idx: usize) -> Self {
-        //This is doing some bit packing so debug check numbers
-        //are in the expected ranges and check that usize is 64 bits.
-        assert!(size_of::<usize>() == 8);
-        debug_assert!(machine < (1 << (64 - Self::INDEX_BITS)));
-        debug_assert!(idx < (1 << Self::INDEX_BITS));
-        MachineRef((machine << Self::INDEX_BITS) | idx)
-    }
-
-    pub fn index(self) -> usize {
-        self.0 & ((1 << Self::INDEX_BITS) - 1)
-    }
-
-    pub fn machine(self) -> usize {
-        self.0 >> Self::INDEX_BITS
-    }
-}
-
-#[derive(Clone, Debug)]
-struct MachineState {
-    //Current state
-    cur_state: usize,
-    //This is the location of a structure for tracking which states are active and its parent states.
-    active_states_idx: usize,
-    //This will get a field for [Local Variable State]
-}
-
-#[derive(Debug)]
-struct MachineArena {
-    states: Vec<MachineState>,
-}
-
 #[derive(Debug)]
 //This stores the states of a given machine.
 struct PerMachineSet {
     //TODO - replace with bitset or something even more efficient.
     //The current active states. This is reset before each round of GLL.
     states: Vec<bool>,
-    //All nodes within a per machine set share the same parents. This
-    //can proabaly be replaced with a linked list structure.
-    parents: Vec<MachineRef>,
+    //All nodes within a per machine set share the same parents. 
+    parents: Vec<ItemHeader>,
 }
 
 #[derive(Debug)]
 struct Gss {
-    frozen: FrozenStates,
     counted: CountedStates,
 }
 
 impl Gss {
     fn new(machines: &Vec<Machine>) -> Self {
-        let frozen = machines
-            .into_iter()
-            .map(|_machine| MachineArena { states: vec![] })
-            .collect();
         let counted = machines
             .into_iter()
             .map(|machine| PerMachineSetArena {
@@ -153,7 +113,6 @@ impl Gss {
             .collect();
 
         Gss {
-            frozen: FrozenStates { frozen },
             counted: CountedStates { counted },
         }
     }
@@ -186,22 +145,6 @@ impl CountedStates {
 struct PerMachineSetArena {
     num_states: usize,
     sets: Vec<PerMachineSet>,
-}
-
-#[derive(Debug)]
-struct FrozenStates {
-    frozen: Vec<MachineArena>,
-}
-
-impl FrozenStates {
-    fn create_state(&mut self, state: MachineState, arena: usize) -> MachineRef {
-        self.frozen[arena].states.push(state);
-        MachineRef::new(arena, self.frozen[arena].states.len() - 1)
-    }
-
-    fn get(&self, machine_ref: MachineRef) -> &MachineState {
-        &self.frozen[machine_ref.machine()].states[machine_ref.index()]
-    }
 }
 
 pub fn run(machines: &Vec<Machine>, input: &str) -> Vec<ItemHeader> {
@@ -263,13 +206,7 @@ fn advance_machine(
                 }
             }
             NsmEdgeTransition::Call(call_data) => {
-                let return_state = gss.frozen.create_state(
-                    MachineState {
-                        cur_state: call_data.return_node,
-                        active_states_idx: current_state.bitset_idx(),
-                    },
-                    current_state.machine(),
-                );
+                let return_state = ItemHeader::new(current_state.machine, call_data.return_node, current_state.bitset_idx());
                 let new_active_state = call_wavefront.get_or_init(call_data.target_machine, || {
                     let set = gss.counted.create(call_data.target_machine);
                     ItemHeader::new(call_data.target_machine, 0, set)
@@ -297,15 +234,14 @@ fn advance_machine(
                     .parents
                     .len()
                 {
-                    let frozen_ref = gss
+                    let frozen_ref = &gss
                         .counted
                         .get(current_state.machine(), current_state.bitset_idx())
                         .parents[i];
-                    let state = gss.frozen.get(frozen_ref).clone();
                     let current = ItemHeader::new(
                         frozen_ref.machine(),
-                        state.cur_state,
-                        state.active_states_idx,
+                        frozen_ref.state(),
+                        frozen_ref.bitset_idx(),
                     );
                     advance_machine(
                         gss,
