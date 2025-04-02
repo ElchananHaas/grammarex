@@ -3,7 +3,7 @@ use bitset::Bitsets;
 mod bitset {
     pub struct Bitsets {
         //TODO replace this with something much more efficient
-        data: Vec<Vec<bool>>
+        data: Vec<Vec<bool>>,
     }
 
     impl Bitsets {
@@ -31,7 +31,7 @@ mod bitset {
 }
 
 struct MachineStarts {
-    starts: Vec<MachineStart>
+    starts: Vec<MachineStart>,
 }
 
 struct MachineStart {
@@ -41,8 +41,6 @@ struct MachineStart {
 fn run_machine(char_iter: &mut (impl Iterator<Item = char> + Clone)) {
     let mut index = 0;
     while let Some(c) = char_iter.next() {
-        
-
         index += 1;
     }
 }

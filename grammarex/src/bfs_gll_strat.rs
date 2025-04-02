@@ -1,4 +1,88 @@
+use std::{cell::UnsafeCell, num::NonZeroUsize};
+
 use crate::nsms::{Machine, NsmEdgeTransition};
+
+pub struct ItemHeader {
+    //The machine type
+    machine: usize,
+    //The current state within the machine
+    state: usize,
+    //An index to a bitset for tracking the active states
+    bitset_idx: usize,
+}
+
+impl ItemHeader {
+    fn new(machine: usize, state: usize, bitset_idx: usize) -> Self {
+        Self {
+            machine,
+            state,
+            bitset_idx,
+        }
+    }
+
+    pub fn set_state(&mut self, state: usize) {
+        self.state = state;
+    }
+
+    pub fn set_bitset_idx(&mut self, bitset_idx: usize) {
+        self.bitset_idx = bitset_idx;
+    }
+
+    pub fn machine(&self) -> usize {
+        self.machine
+    }
+
+    pub fn state(&self) -> usize {
+        self.state
+    }
+
+    pub fn bitset_idx(&self) -> usize {
+        self.bitset_idx
+    }
+}
+
+struct WaveFront {
+    items: Vec<UnsafeCell<Option<ItemHeader>>>,
+    to_clear: UnsafeCell<Vec<usize>>,
+}
+
+impl WaveFront {
+    fn new(num_entries: usize) -> Self {
+        Self {
+            items: (0..num_entries).map(|_| UnsafeCell::new(None)).collect(),
+            to_clear: UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    fn get_or_init(&self, machine: usize, mut f: impl FnMut() -> ItemHeader) -> &ItemHeader {
+        let to_clear;
+        let item;
+        unsafe {
+            to_clear = &mut *self.to_clear.get();
+            item = &mut *self.items[machine].get()
+        }
+        //Safety: If there is an immutable reference to a value this method
+        //will return another immutable reference and not alter the value.
+        //It will only mutate the value if it is None, in which case there
+        //are no references to it.
+        item.get_or_insert_with(|| {
+            to_clear.push(machine);
+            f()
+        })
+    }
+
+    //Safety: There must be no outstanding references to items in the container.
+    unsafe fn clear(&mut self) {
+        let to_clear;
+        unsafe {
+            to_clear = &mut *self.to_clear.get();
+        }
+        for machine in &*to_clear {
+            self.items[*machine] = UnsafeCell::new(None);
+        }
+        to_clear.clear();
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MachineRef(usize);
@@ -50,17 +134,12 @@ struct PerMachineSet {
 
 #[derive(Debug)]
 struct Gss {
-    active: ActiveStates,
     frozen: FrozenStates,
     counted: CountedStates,
 }
 
 impl Gss {
     fn new(machines: &Vec<Machine>) -> Self {
-        let active = machines
-            .into_iter()
-            .map(|_machine| MachineArena { states: vec![] })
-            .collect();
         let frozen = machines
             .into_iter()
             .map(|_machine| MachineArena { states: vec![] })
@@ -74,7 +153,6 @@ impl Gss {
             .collect();
 
         Gss {
-            active: ActiveStates { active },
             frozen: FrozenStates { frozen },
             counted: CountedStates { counted },
         }
@@ -111,21 +189,6 @@ struct PerMachineSetArena {
 }
 
 #[derive(Debug)]
-struct ActiveStates {
-    active: Vec<MachineArena>,
-}
-impl ActiveStates {
-    fn get(&self, machine_ref: MachineRef) -> &MachineState {
-        &self.active[machine_ref.machine()].states[machine_ref.index()]
-    }
-
-    fn create_state(&mut self, state: MachineState, arena: usize) -> MachineRef {
-        self.active[arena].states.push(state);
-        MachineRef::new(arena, self.active[arena].states.len() - 1)
-    }
-}
-
-#[derive(Debug)]
 struct FrozenStates {
     frozen: Vec<MachineArena>,
 }
@@ -141,29 +204,29 @@ impl FrozenStates {
     }
 }
 
-pub fn run(machines: &Vec<Machine>, input: &str) -> Vec<MachineRef> {
+pub fn run(machines: &Vec<Machine>, input: &str) -> Vec<ItemHeader> {
     let mut gss = Gss::new(machines);
     let set = gss.counted.create(0);
-    let init_state = gss.active.create_state(
-        MachineState {
-            cur_state: 0,
-            active_states_idx: set,
-        },
-        0,
-    );
+    let init_state = ItemHeader::new(0, 0, set);
     let mut machine_refs = vec![init_state];
-    for char in input.chars() {
+    let mut wavefront = WaveFront::new(machines.len());
+    for (count, char) in input.chars().enumerate() {
+        //TODO reset bitsets!!! This is a bug RN.
         let mut new_states = vec![];
-        let mut new_machine_active_state_idx = vec![None; machines.len()];
         for r in &machine_refs {
             advance_machine(
                 &mut gss,
                 machines,
-                *r,
+                r,
                 &mut new_states,
-                &mut new_machine_active_state_idx,
+                &wavefront,
+                count,
                 char,
             );
+        }
+        //SAFETY: There are no outstanding references to items in the wavefront.
+        unsafe {
+            wavefront.clear();
         }
         machine_refs = new_states;
     }
@@ -173,30 +236,29 @@ pub fn run(machines: &Vec<Machine>, input: &str) -> Vec<MachineRef> {
 fn advance_machine(
     gss: &mut Gss,
     machines: &Vec<Machine>,
-    machine_ref: MachineRef,
-    new_states: &mut Vec<MachineRef>,
-    new_machine_active_state_idx: &mut Vec<Option<MachineRef>>,
+    current_state: &ItemHeader,
+    new_states: &mut Vec<ItemHeader>,
+    call_wavefront: &WaveFront,
+    count: usize,
     c: char,
 ) {
-    let state = gss.active.get(machine_ref).clone();
-    for edge in &machines[machine_ref.machine()].edges[state.cur_state] {
+    for edge in &machines[current_state.machine()].edges[current_state.state()] {
         match &edge.transition {
             NsmEdgeTransition::Move(char_match, target) => {
                 if char_match.matches(c) {
                     if !gss
                         .counted
-                        .get(machine_ref.machine(), state.active_states_idx)
+                        .get(current_state.machine(), current_state.bitset_idx())
                         .states[*target]
                     {
                         gss.counted
-                            .get_mut(machine_ref.machine(), state.active_states_idx)
+                            .get_mut(current_state.machine(), current_state.bitset_idx())
                             .states[*target] = true;
-                        let new_state = MachineState {
-                            cur_state: *target,
-                            active_states_idx: state.active_states_idx,
-                        };
-                        let new_ref = gss.active.create_state(new_state, machine_ref.machine());
-                        new_states.push(new_ref);
+                        new_states.push(ItemHeader::new(
+                            current_state.machine(),
+                            *target,
+                            current_state.bitset_idx(),
+                        ));
                     }
                 }
             }
@@ -204,21 +266,14 @@ fn advance_machine(
                 let return_state = gss.frozen.create_state(
                     MachineState {
                         cur_state: call_data.return_node,
-                        active_states_idx: state.active_states_idx,
+                        active_states_idx: current_state.bitset_idx(),
                     },
-                    machine_ref.machine(),
+                    current_state.machine(),
                 );
-                let new_active_state = new_machine_active_state_idx[call_data.target_machine]
-                    .unwrap_or_else(|| {
-                        let set = gss.counted.create(call_data.target_machine);
-                        gss.active.create_state(
-                            MachineState {
-                                cur_state: 0,
-                                active_states_idx: set,
-                            },
-                            call_data.target_machine,
-                        )
-                    });
+                let new_active_state = call_wavefront.get_or_init(call_data.target_machine, || {
+                    let set = gss.counted.create(call_data.target_machine);
+                    ItemHeader::new(call_data.target_machine, 0, set)
+                });
                 //Advance the new machine on the given char.
                 //Prior transformations guarantee this won't lead to infinite recursion.
                 advance_machine(
@@ -226,34 +281,39 @@ fn advance_machine(
                     machines,
                     new_active_state,
                     new_states,
-                    new_machine_active_state_idx,
+                    call_wavefront,
+                    count,
                     c,
                 );
-                let set_idx = gss.active.get(new_active_state).active_states_idx;
                 gss.counted
-                    .get_mut(new_active_state.machine(), set_idx)
+                    .get_mut(new_active_state.machine(), new_active_state.bitset_idx())
                     .parents
                     .push(return_state);
             }
             NsmEdgeTransition::Return => {
                 for i in 0..gss
                     .counted
-                    .get(machine_ref.machine(), state.active_states_idx)
+                    .get(current_state.machine(), current_state.bitset_idx())
                     .parents
                     .len()
                 {
                     let frozen_ref = gss
                         .counted
-                        .get(machine_ref.machine(), state.active_states_idx)
+                        .get(current_state.machine(), current_state.bitset_idx())
                         .parents[i];
                     let state = gss.frozen.get(frozen_ref).clone();
-                    let new_active = gss.active.create_state(state, frozen_ref.machine());
+                    let current = ItemHeader::new(
+                        frozen_ref.machine(),
+                        state.cur_state,
+                        state.active_states_idx,
+                    );
                     advance_machine(
                         gss,
                         machines,
-                        new_active,
+                        &current,
                         new_states,
-                        new_machine_active_state_idx,
+                        call_wavefront,
+                        count,
                         c,
                     );
                 }
@@ -277,7 +337,7 @@ mod tests {
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr);
         let machines: Vec<Machine> = compile(&machines).unwrap();
-        let res: Vec<MachineRef> = run(&machines, "a");
+        let res = run(&machines, "a");
         assert!(res.len() == 1);
         let res = run(&machines, "c");
         assert!(res.len() == 1);
