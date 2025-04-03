@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell};
+use std::{cell::UnsafeCell, num::{NonZero, NonZeroUsize}};
 
 use crate::nsms::{Machine, NsmEdgeTransition};
 
@@ -90,71 +90,88 @@ impl WaveFront {
 #[derive(Debug)]
 //This stores the states of a given machine.
 struct PerMachineSet {
-    //TODO - replace with bitset or something even more efficient.
+    //TODO - replace with bitset.
     //The current active states. This is reset before each round of GLL.
     states: Vec<bool>,
     //All nodes within a per machine set share the same parents. 
     parents: Vec<ItemHeader>,
+    //Next entry to clear
+    next: Option<NonZeroUsize>
 }
 
 #[derive(Debug)]
 struct Gss {
-    counted: CountedStates,
+    tracking_sets: SetArena,
 }
 
 impl Gss {
     fn new(machines: &Vec<Machine>) -> Self {
-        let counted = machines
-            .into_iter()
-            .map(|machine| PerMachineSetArena {
-                num_states: machine.edges.len(),
-                sets: vec![],
-            })
-            .collect();
-
         Gss {
-            counted: CountedStates { counted },
+            tracking_sets: SetArena::new(machines.iter().map(|x|x.edges.len()).max().unwrap_or_default()),
         }
     }
 }
-#[derive(Debug)]
-struct CountedStates {
-    counted: Vec<PerMachineSetArena>,
-}
-
-impl CountedStates {
-    fn create(&mut self, arena: usize) -> usize {
-        let num_states = self.counted[arena].num_states;
-        self.counted[arena].sets.push(PerMachineSet {
-            states: vec![false; num_states],
-            parents: Vec::new(),
-        });
-        self.counted[arena].sets.len() - 1
-    }
-
-    fn get(&self, arena: usize, idx: usize) -> &PerMachineSet {
-        &self.counted[arena].sets[idx]
-    }
-
-    fn get_mut(&mut self, arena: usize, idx: usize) -> &mut PerMachineSet {
-        &mut self.counted[arena].sets[idx]
-    }
-}
 
 #[derive(Debug)]
-struct PerMachineSetArena {
-    num_states: usize,
+struct SetArena {
+    max_num_states: usize,
     sets: Vec<PerMachineSet>,
+    visited_head: Option<NonZeroUsize>
+}
+
+impl SetArena {
+
+    fn new(max_num_states: usize) -> Self {
+        SetArena {
+            max_num_states,
+            sets: vec![],
+            visited_head: None
+        }
+    }
+    fn create(&mut self) -> usize {
+        self.sets.push(PerMachineSet {
+            states: vec![false; self.max_num_states],
+            parents: Vec::new(),
+            next: None
+        });
+        self.sets.len() - 1
+    }
+
+    fn get(&self, idx: usize) -> &PerMachineSet {
+        &self.sets[idx]
+    }
+
+    fn get_mut(&mut self, idx: usize) -> &mut PerMachineSet {
+        if self.sets[idx].next.is_none() {
+            self.sets[idx].next = self.visited_head;
+            self.visited_head = Some(unsafe {NonZero::new_unchecked(
+                idx + 1
+            )});
+        }
+        &mut self.sets[idx]
+    }
+
+    fn clear(&mut self) {
+        let mut next_clear = self.visited_head;
+        self.visited_head = None;
+        while let Some(entry) = next_clear {
+            let entry = usize::from(entry)-1;
+            next_clear = self.sets[entry].next;
+            self.sets[entry].next = None;
+            for state in &mut self.sets[entry].states {
+                *state = false;
+            }
+        }
+    }
 }
 
 pub fn run(machines: &Vec<Machine>, input: &str) -> Vec<ItemHeader> {
     let mut gss = Gss::new(machines);
-    let set = gss.counted.create(0);
+    let set = gss.tracking_sets.create();
     let init_state = ItemHeader::new(0, 0, set);
     let mut machine_refs = vec![init_state];
     let mut wavefront = WaveFront::new(machines.len());
     for (count, char) in input.chars().enumerate() {
-        //TODO reset bitsets!!! This is a bug RN.
         let mut new_states = vec![];
         for r in &machine_refs {
             advance_machine(
@@ -171,6 +188,7 @@ pub fn run(machines: &Vec<Machine>, input: &str) -> Vec<ItemHeader> {
         unsafe {
             wavefront.clear();
         }
+        gss.tracking_sets.clear();
         machine_refs = new_states;
     }
     machine_refs
@@ -190,12 +208,12 @@ fn advance_machine(
             NsmEdgeTransition::Move(char_match, target) => {
                 if char_match.matches(c) {
                     if !gss
-                        .counted
-                        .get(current_state.machine(), current_state.bitset_idx())
+                        .tracking_sets
+                        .get(current_state.bitset_idx())
                         .states[*target]
                     {
-                        gss.counted
-                            .get_mut(current_state.machine(), current_state.bitset_idx())
+                        gss.tracking_sets
+                            .get_mut(current_state.bitset_idx())
                             .states[*target] = true;
                         new_states.push(ItemHeader::new(
                             current_state.machine(),
@@ -208,7 +226,7 @@ fn advance_machine(
             NsmEdgeTransition::Call(call_data) => {
                 let return_state = ItemHeader::new(current_state.machine, call_data.return_node, current_state.bitset_idx());
                 let new_active_state = call_wavefront.get_or_init(call_data.target_machine, || {
-                    let set = gss.counted.create(call_data.target_machine);
+                    let set = gss.tracking_sets.create();
                     ItemHeader::new(call_data.target_machine, 0, set)
                 });
                 //Advance the new machine on the given char.
@@ -222,21 +240,21 @@ fn advance_machine(
                     count,
                     c,
                 );
-                gss.counted
-                    .get_mut(new_active_state.machine(), new_active_state.bitset_idx())
+                gss.tracking_sets
+                    .get_mut(new_active_state.bitset_idx())
                     .parents
                     .push(return_state);
             }
             NsmEdgeTransition::Return => {
                 for i in 0..gss
-                    .counted
-                    .get(current_state.machine(), current_state.bitset_idx())
+                    .tracking_sets
+                    .get(current_state.bitset_idx())
                     .parents
                     .len()
                 {
                     let frozen_ref = &gss
-                        .counted
-                        .get(current_state.machine(), current_state.bitset_idx())
+                        .tracking_sets
+                        .get(current_state.bitset_idx())
                         .parents[i];
                     let current = ItemHeader::new(
                         frozen_ref.machine(),
