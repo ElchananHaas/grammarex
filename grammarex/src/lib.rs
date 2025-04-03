@@ -1,5 +1,4 @@
 mod bfs_gll_strat;
-mod dfs_gll_strat;
 mod elim_epsilon;
 mod expr_parser;
 mod lower_grammarex;
