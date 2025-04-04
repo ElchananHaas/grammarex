@@ -100,7 +100,7 @@ fn parse_terminal(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
     if first == '(' {
         return parse_parentheses(input);
     }
-    if first == '"' {
+    if first == '\'' {
         return parse_string(input);
     }
     if first.is_ascii_alphabetic() {
@@ -125,7 +125,7 @@ fn parse_varname(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
 fn parse_string(input: &mut &str) -> Result<GrammarEx, GrammarexParseError> {
     let mut res = Vec::new();
     while let Some(c) = take_first(input) {
-        if c == '"' {
+        if c == '\'' {
             return Ok(GrammarEx::Seq(res));
         } else {
             res.push(GrammarEx::Char(c));
@@ -317,21 +317,8 @@ mod tests {
     }
 
     #[test]
-    fn test_string() {
-        let result = parse_grammarex(&mut "\"abc\"").unwrap();
-        assert_eq!(
-            GrammarEx::Seq(vec![
-                GrammarEx::Char('a'),
-                GrammarEx::Char('b'),
-                GrammarEx::Char('c')
-            ]),
-            result
-        );
-    }
-
-    #[test]
     fn test_raw_string() {
-        let result = parse_grammarex(&mut r#""abc""#).unwrap();
+        let result = parse_grammarex(&mut "'abc'").unwrap();
         assert_eq!(
             GrammarEx::Seq(vec![
                 GrammarEx::Char('a'),
@@ -344,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_trimming() {
-        let result = parse_grammarex(&mut r#" "abc" "#).unwrap();
+        let result = parse_grammarex(&mut " 'abc' ").unwrap();
         assert_eq!(
             GrammarEx::Seq(vec![
                 GrammarEx::Char('a'),
@@ -357,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_simple_seq() {
-        let result = parse_grammarex(&mut r#" "a" "b" "c" "#).unwrap();
+        let result = parse_grammarex(&mut " 'a' 'b' 'c' ").unwrap();
         assert_eq!(
             GrammarEx::Seq(vec![
                 GrammarEx::Seq(vec![GrammarEx::Char('a')]),
@@ -369,7 +356,7 @@ mod tests {
     }
     #[test]
     fn test_var_assignment() {
-        let result = parse_grammarex(&mut r#" abc = def "#).unwrap();
+        let result = parse_grammarex(&mut " abc = def ").unwrap();
         assert_eq!(
             GrammarEx::Assign(
                 Box::new(GrammarEx::Var("abc".to_owned())),
@@ -381,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_alt() {
-        let result = parse_grammarex(&mut r#" "a" | "b" "#).unwrap();
+        let result = parse_grammarex(&mut " 'a' | 'b' ").unwrap();
         assert_eq!(
             GrammarEx::Alt(vec![
                 GrammarEx::Seq(vec![GrammarEx::Char('a')]),
@@ -393,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_paren() {
-        let result = parse_grammarex(&mut r#" ("a" | "b") "#).unwrap();
+        let result = parse_grammarex(&mut " ('a' | 'b') ").unwrap();
         assert_eq!(
             GrammarEx::Alt(vec![
                 GrammarEx::Seq(vec![GrammarEx::Char('a')]),
@@ -405,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_paren_seq() {
-        let result = parse_grammarex(&mut r#" ("a" | "b") "c" "#).unwrap();
+        let result = parse_grammarex(&mut " ('a' | 'b') 'c'").unwrap();
         assert_eq!(
             GrammarEx::Seq(vec![
                 GrammarEx::Alt(vec![
@@ -414,6 +401,18 @@ mod tests {
                 ]),
                 GrammarEx::Seq(vec![GrammarEx::Char('c')])
             ]),
+            result
+        );
+    }
+
+    #[test]
+    fn test_parse_str_assigned() {
+        let result = parse_grammarex(&mut " abc = 'c' ").unwrap();
+        assert_eq!(
+            GrammarEx::Assign(
+                Box::new(GrammarEx::Var("abc".to_owned())),
+                Box::new(GrammarEx::Seq(vec![GrammarEx::Char('c')]))
+            ),
             result
         );
     }

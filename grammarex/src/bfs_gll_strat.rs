@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_rec() {
-        let expr_one = parse_grammarex(&mut r#" "a" | \( start \) "#).unwrap();
+        let expr_one = parse_grammarex(&mut " 'a' | \\( start \\) ").unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);

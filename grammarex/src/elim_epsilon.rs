@@ -421,8 +421,8 @@ mod tests {
 
     #[test]
     fn test_lower_machine_multi() {
-        let expr_one = parse_grammarex(&mut r#" abc = second "#).unwrap();
-        let expr_two = parse_grammarex(&mut r#"[abc]"#).unwrap();
+        let expr_one = parse_grammarex(&mut " abc = second ").unwrap();
+        let expr_two = parse_grammarex(&mut "[abc]").unwrap();
         let start = "start".to_string();
         let second = "second".to_string();
         let mut machines = HashMap::new();
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_lower_rec() {
-        let expr_one = parse_grammarex(&mut r#" "a" | \( start \) "#).unwrap();
+        let expr_one = parse_grammarex(&mut " 'a' | \\( start \\) ").unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_lower_rec_two() {
-        let expr_one = parse_grammarex(&mut r#"   "a" "b"  | "c" start  "#).unwrap();
+        let expr_one = parse_grammarex(&mut " 'ab'  | 'c' start  ").unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
@@ -454,8 +454,8 @@ mod tests {
 
     #[test]
     fn test_lower_call_epsilon() {
-        let expr_one = parse_grammarex(&mut r#" abc = second "#).unwrap();
-        let expr_two = parse_grammarex(&mut r#" "x"?"y"?"z"? "#).unwrap();
+        let expr_one = parse_grammarex(&mut " abc = second ").unwrap();
+        let expr_two = parse_grammarex(&mut " 'x'?'y'?'z'? ").unwrap();
         let start = "start".to_string();
         let second = "second".to_string();
         let mut machines = HashMap::new();
@@ -467,8 +467,8 @@ mod tests {
 
     #[test]
     fn test_lower_call_epsilon_two() {
-        let expr_one = parse_grammarex(&mut r#" abc = second "x" "#).unwrap();
-        let expr_two = parse_grammarex(&mut r#" "yz"? "#).unwrap();
+        let expr_one = parse_grammarex(&mut " abc = second 'x' ").unwrap();
+        let expr_two = parse_grammarex(&mut " 'yz'? ").unwrap();
         let start = "start".to_string();
         let second = "second".to_string();
         let mut machines = HashMap::new();
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_lower_left_recursive_loop() {
-        let expr_one = parse_grammarex(&mut r#"  start? "a"   "#).unwrap();
+        let expr_one = parse_grammarex(&mut "  start? 'a'   ").unwrap();
         let start = "start".to_string();
         let mut machines = HashMap::new();
         machines.insert(start.clone(), expr_one);
